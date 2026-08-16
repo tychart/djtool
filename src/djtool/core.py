@@ -1420,17 +1420,17 @@ def cmd_sync(args: argparse.Namespace, console: Console, root: Path) -> int:
     for label, src, dst in plans:
         console.out(f"  {label}: {src}  →  {dst}")
 
-    if requires_confirmation(args.dry_run, args.yes):
-        answer = input("Proceed? [y/N] ").strip().lower()
-        if answer not in ("y", "yes"):
-            console.info("aborted — nothing was changed")
-            return 0
-
     if any(label == "Mixxx" for label, _, _ in plans):
         err = mixxx_guard(cfg, console)
         if err:
             console.error(err)
             return 2
+
+    if requires_confirmation(args.dry_run, args.yes):
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            console.info("aborted — nothing was changed")
+            return 0
 
     for label, src, dst in plans:
         cmd = build_rsync_cmd(src, dst, dry_run=args.dry_run, delete=args.delete)
