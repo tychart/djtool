@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Test / tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# djtool runtime state (derived data only; lives next to the collection anyway)
+.djtool-cache.json

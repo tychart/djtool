@@ -1,0 +1,14 @@
+# djtool configuration — example template (copy to the DJ root as djtool.toml).
+#
+# The real configuration lives at the DJ root, next to Library/, Tracks/ and
+# Incoming/ (the tool looks for <DJ root>/djtool.toml). Uncomment and edit the
+# values below, then delete this file.
+
+[sync]
+# SSH target for rsync, e.g. "user@laptop"
+# remote = "user@laptop"
+# Remote path of the DJ root on that host
+# remote_dj = "/home/user/Music/DJ"
+# Mixxx settings directories (optional but recommended):
+# local_mixxx = "/home/user/.mixxx"
+# remote_mixxx = "/home/user/.mixxx"
