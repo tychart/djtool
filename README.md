@@ -1,14 +1,15 @@
 # djtool
 
 Small, maintainable CLI for managing a DJ music collection. Data safety is the
-first priority: `Library/` is strictly read-only, and interactive removal only
-quarantines files into `.Trash/YYYY-MM-DD/` (a hidden folder Mixxx never scans).
+first priority: `Library/` is read-only except for *recorded decisions* (see
+below), and interactive removal only quarantines files into `.Trash/YYYY-MM-DD/`
+(a hidden folder Mixxx never scans).
 
 ## Collection layout
 
 ```
 DJ/                                  # location configured in djtool.toml
-├── Library/             read-only Beets mirror — NEVER modified by djtool
+├── Library/             Beets mirror — read-only except for recorded decisions
 ├── Tracks/              canonical DJ tracks — flat, 'Title - Artist [Version].ext'
 ├── Incoming/            staging area, reviewed before promotion
 └── .Trash/YYYY-MM-DD/   quarantine (flat), skipped by Mixxx library scans
@@ -51,11 +52,15 @@ useful when the project still lives inside the DJ folder).
 
 ```sh
 uv run djtool scan                     # summary + candidate counts
-uv run djtool dedupe                   # interactive duplicate review
+uv run djtool dedupe                   # interactive duplicate review (replays recorded decisions first)
+uv run djtool dedupe --no-replay       # skip the replay step
 uv run djtool ingest                   # Incoming/ review → promote to Tracks or quarantine
 uv run djtool trash list               # inspect quarantine
 uv run djtool trash empty --yes        # permanently empty quarantine
 uv run djtool cache status | clear     # derived-data cache
+uv run djtool decisions list           # recorded Library-internal decisions
+uv run djtool decisions remove <id>    # drop one decision
+uv run djtool decisions clear          # drop all decisions
 uv run djtool sync status              # dry-run comparison both directions
 uv run djtool sync push -n             # dry-run push (local → remote)
 uv run djtool sync push                # push with confirmation
@@ -113,6 +118,37 @@ quarantines the other to `.Trash/YYYY-MM-DD/`; `[b]` keeps both (in `ingest`,
 it also promotes the Incoming copy to `Tracks/` — flat, renamed); `[p]`/`[o]`
 play files via `ffplay`; `[c]` plays A then B; `[s]` defers; `[q]` quits safely.
 
+## Library-internal duplicates: recorded decisions
+
+When **both** files of a pair live in `Library/`, djtool cannot silently pick a
+winner — but it can remember yours. The review prompt gains four recorded
+choices:
+
+```
+[l] Keep A / remove B      (removes B now, records the decision)
+[j] Keep B / remove A      (removes A now, records the decision)
+[b] Keep both              (records it, so the pair never re-asks)
+[v] Version/rename         (rename A/B/both with a version qualifier, e.g.
+                            'How Great Thou Art - The Tabernacle Choir at
+                            Temple Square [Live].flac' — in place, same album
+                            folder, using the Tracks naming scheme)
+```
+
+Each decision is stored in `.djtool-decisions.json` in the `djtool/` project
+folder — **outside the DJ root**, so a NAS sync never touches it. The losing
+file is quarantined into `.Trash/` immediately.
+
+Because the `Library/` folder is often replaced wholesale from a NAS (silently
+undoing any cleanup), every `djtool dedupe` run **replays** the recorded
+decisions first, before you are asked anything: losers are re-quarantined,
+renames re-applied — matched by relative path inside `Library/`, which the NAS
+copy preserves. `dedupe --no-replay` disables the step; `djtool decisions
+list/remove/clear` inspects or edits the set.
+
+This is the **only** way djtool modifies `Library/`. For pairs that span
+`Library/` vs `Tracks/`/`Incoming/`, behavior is unchanged: the Library copy
+wins and the other side is removed.
+
 ## Mixxx
 
 Add your DJ root (or just `Tracks/`) as a library directory in Mixxx. Mixxx's
@@ -120,12 +156,15 @@ library scanner skips dot-prefixed (hidden) folders, so `.Trash/` never shows
 up in a library scan — no extra setup needed. If you don't want `Library/`
 (Beets mirror) tracks in Mixxx, add only `Tracks/` (and `Incoming/`) as roots.
 
-## Cache
+## Cache & decisions files
 
 `.djtool-cache.json` lives in the `djtool/` project folder and stores
 **derived data only** (hashes, durations, parsed tags, fingerprints), invalidated
-by file size + mtime. It is tagged with the DJ root it was built for. Deleting
-it (`djtool cache clear`) can never lose collection state or review decisions.
+by file size + mtime. `.djtool-decisions.json` stores **your recorded
+Library-internal decisions** (user intent, replayed on `dedupe`). Both are
+tagged with the DJ root they were built for. Deleting the cache can never lose
+collection state or review decisions; deleting the decisions file only means
+the next `dedupe` will ask you about Library-internal pairs again.
 
 ## Sync
 

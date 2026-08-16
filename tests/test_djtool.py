@@ -5,6 +5,7 @@ real collection. Fingerprint tests either use crafted base64 payloads or skip
 when fpcalc is absent.
 """
 
+import argparse
 import base64
 import math
 import os
@@ -15,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from djtool import core as dt
+import djtool as dt
+from djtool.commands import cmd_dedupe
 
 # ---------------------------------------------------------------------------
 # Fixtures & helpers
@@ -184,7 +186,9 @@ class TestClassification:
         assert p.category == "POSSIBLE_ALTERNATE_VERSION"
         assert "version term" in p.note
 
-    def test_no_fingerprint_caps_at_possible(self, root):
+    def test_no_fingerprint_caps_at_possible(self, root, monkeypatch):
+        # Without fpcalc the classifier must never rise above "possible".
+        monkeypatch.setattr(dt.fingerprint, "FPCALC", None)
         p = self._pair(root, "Same Song", "Same Song")  # fp_sim None
         assert p.category == "POSSIBLE_SAME_RECORDING"
         assert "no fpcalc" in p.note
@@ -221,12 +225,14 @@ class TestLibraryPreference:
 
 class TestPathSafety:
     def test_ensure_within_rejects_escape(self, tmp_path: Path):
+        from djtool.quarantine import _ensure_within
+
         dj = tmp_path / "dj"
         dj.mkdir()
         evil = tmp_path / "evil.flac"
         evil.write_bytes(b"x")
         with pytest.raises(ValueError):
-            dt._ensure_within(evil.resolve(), dj.resolve(), "source")
+            _ensure_within(evil.resolve(), dj.resolve(), "source")
 
     def test_quarantine_refuses_library(self, root):
         f = root / "Library" / "x.flac"
@@ -549,11 +555,11 @@ class TestFingerprints:
 
     @pytest.mark.skipif(shutil.which("fpcalc") is None, reason="fpcalc not installed")
     def test_compute_fingerprint_with_tool(self, tmp_path: Path):
-        f = make_wav(tmp_path / "x.wav", seconds=2.0)
+        f = make_wav(tmp_path / "x.wav", seconds=5.0)
         res = dt.compute_fingerprint(f)
         assert res is not None
         fp, dur = res
-        assert fp and dur == pytest.approx(2.0, abs=0.5)
+        assert fp and dur == pytest.approx(5.0, abs=0.5)
         # stored fingerprints must round-trip through the similarity scorer
         assert dt.fp_similarity(fp, fp) is not None
         assert dt.fp_similarity(fp, fp) == pytest.approx(1.0)
@@ -793,3 +799,189 @@ class TestConfig:
         dt.config_path().write_text("[sync\nnope")
         with pytest.raises(dt.ConfigError):
             dt.load_config()
+
+
+# ---------------------------------------------------------------------------
+# Recorded Library-internal decisions & replay
+# ---------------------------------------------------------------------------
+
+
+class TestDecisions:
+    def _lib_pair(self, root, title="Song", artist="Artist"):
+        a = make_track(root, "library", "Album A/01 - Song.flac", title=title, artist=artist)
+        b = make_track(root, "library", "Album B/02 - Song.flac", title=title, artist=artist)
+        return dt.make_pair(a, b)
+
+    def test_record_remove_one_decision_per_pair(self, root):
+        p = self._lib_pair(root)
+        dt.record_remove_decision(root, kept_rel=p.a.rel, removed_rel=p.b.rel)
+        data = dt.load_decisions(root)
+        assert len(data["decisions"]) == 1
+        d = data["decisions"][0]
+        assert d["action"] == "remove" and d["kept"] == p.a.rel and d["removed"] == p.b.rel
+        # re-recording the same pair replaces the old decision (user changed mind)
+        dt.record_keep_both_decision(root, p.a.rel, p.b.rel)
+        data = dt.load_decisions(root)
+        assert len(data["decisions"]) == 1
+        assert data["decisions"][0]["action"] == "keep_both"
+
+    def test_replay_remove_quarantines_and_survives_reset(self, root):
+        fa = root / "Library" / "Album A" / "01 - Song.flac"
+        fb = root / "Library" / "Album B" / "02 - Song.flac"
+        fa.parent.mkdir(parents=True)
+        fa.write_bytes(b"a")
+        fb.parent.mkdir(parents=True)
+        fb.write_bytes(b"b")
+        rel_a, rel_b = "Library/Album A/01 - Song.flac", "Library/Album B/02 - Song.flac"
+        dt.record_remove_decision(root, kept_rel=rel_a, removed_rel=rel_b)
+
+        stats = dt.replay_decisions(root, dt.Console(color=False))
+        assert stats.removed == 1 and stats.renamed == 0
+        assert fa.exists() and not fb.exists()
+
+        # simulate a NAS reset: the loser is back; replay removes it again
+        fb.write_bytes(b"b2")
+        stats = dt.replay_decisions(root, dt.Console(color=False))
+        assert stats.removed == 1 and not fb.exists()
+
+    def test_replay_skips_when_kept_missing(self, root):
+        fb = root / "Library" / "Album B" / "02 - Song.flac"
+        fb.parent.mkdir(parents=True)
+        fb.write_bytes(b"b")
+        rel_a, rel_b = "Library/Album A/01 - Song.flac", "Library/Album B/02 - Song.flac"
+        dt.record_remove_decision(root, kept_rel=rel_a, removed_rel=rel_b)
+        stats = dt.replay_decisions(root, dt.Console(color=False))
+        assert stats.removed == 0 and stats.skipped == 1
+        assert fb.exists()
+
+    def test_replay_rename(self, root):
+        fa = root / "Library" / "Album A" / "01 - Song.flac"
+        fa.parent.mkdir(parents=True)
+        fa.write_bytes(b"a")
+        rel = "Library/Album A/01 - Song.flac"
+        to_rel = "Library/Album A/Song - Artist [Live].flac"
+        dt.record_rename_decision(root, [(rel, to_rel)])
+        stats = dt.replay_decisions(root, dt.Console(color=False))
+        assert stats.renamed == 1
+        assert not fa.exists() and (root / to_rel).exists()
+
+    def test_replay_rename_skips_when_target_exists(self, root):
+        fa = root / "Library" / "Album A" / "01 - Song.flac"
+        fa.parent.mkdir(parents=True)
+        fa.write_bytes(b"a")
+        to_rel = "Library/Album A/Song - Artist [Live].flac"
+        (root / to_rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / to_rel).write_bytes(b"x")
+        dt.record_rename_decision(root, [("Library/Album A/01 - Song.flac", to_rel)])
+        stats = dt.replay_decisions(root, dt.Console(color=False))
+        assert stats.renamed == 0 and stats.skipped == 1
+
+    def test_replay_keep_both_is_noop(self, root):
+        dt.record_keep_both_decision(root, "Library/A/a.flac", "Library/B/b.flac")
+        stats = dt.replay_decisions(root, dt.Console(color=False))
+        assert stats.removed == 0 and stats.renamed == 0 and stats.skipped == 0
+
+    def test_decisions_management(self, root):
+        p = self._lib_pair(root)
+        dt.record_remove_decision(root, kept_rel=p.a.rel, removed_rel=p.b.rel)
+        did = dt.load_decisions(root)["decisions"][0]["id"]
+        assert dt.delete_decision(root, did) == 1
+        assert dt.load_decisions(root)["decisions"] == []
+        dt.record_remove_decision(root, kept_rel=p.a.rel, removed_rel=p.b.rel)
+        assert dt.clear_decisions(root) == 1
+        assert dt.load_decisions(root)["decisions"] == []
+
+    def test_decision_file_ignored_for_other_root(self, root, tmp_path):
+        p = self._lib_pair(root)
+        dt.record_remove_decision(root, kept_rel=p.a.rel, removed_rel=p.b.rel)
+        other = tmp_path / "other"
+        other.mkdir()
+        assert dt.load_decisions(other)["decisions"] == []
+
+    def test_quarantine_library_file_moves_to_trash(self, root):
+        f = root / "Library" / "Album A" / "01 - Song.flac"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"a")
+        track = make_track(root, "library", "Album A/01 - Song.flac", path=f, size=1)
+        dest = dt.quarantine_library_file(root, track)
+        assert not f.exists() and dest.exists()
+        assert ".Trash" in dest.parts
+
+    def test_cmd_dedupe_replays_before_prompting(self, root, monkeypatch):
+        fa = root / "Library" / "Album A" / "01 - Song.flac"
+        fb = root / "Library" / "Album B" / "02 - Song.flac"
+        fa.parent.mkdir(parents=True)
+        fa.write_bytes(b"a")
+        fb.parent.mkdir(parents=True)
+        fb.write_bytes(b"b")
+        rel_a, rel_b = "Library/Album A/01 - Song.flac", "Library/Album B/02 - Song.flac"
+        dt.record_remove_decision(root, kept_rel=rel_a, removed_rel=rel_b)
+        # input would blow up if the pair were still presented — replay must
+        # resolve it before any prompting
+        monkeypatch.setattr("builtins.input", lambda prompt: (_ for _ in ()).throw(AssertionError("prompted")))
+        args = argparse.Namespace(no_replay=False, no_cache=True)
+        rc = cmd_dedupe(args, dt.Console(color=False), root)
+        assert rc == 0
+        assert fa.exists() and not fb.exists()
+
+
+class TestLibraryPairReview:
+    def _dup_library_pair(self, root):
+        fa = make_wav(root / "Library" / "Album A" / "01 - Song.flac", seed=1)
+        fb = make_wav(root / "Library" / "Album B" / "02 - Song.flac", seed=2)
+        tracks, _ = dt.scan_collection(root)
+        pairs = dt.find_candidates(tracks)
+        assert len(pairs) == 1
+        return pairs[0], fa, fb
+
+    def test_l_removes_b_and_records(self, root, monkeypatch):
+        pair, fa, fb = self._dup_library_pair(root)
+        answers = iter(["l", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.quarantined == 1
+        assert fa.exists() and not fb.exists()
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "remove" and d["removed"] == pair.b.rel and d["kept"] == pair.a.rel
+
+    def test_j_removes_a_and_records(self, root, monkeypatch):
+        pair, fa, fb = self._dup_library_pair(root)
+        answers = iter(["j", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.quarantined == 1
+        assert not fa.exists() and fb.exists()
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "remove" and d["removed"] == pair.a.rel and d["kept"] == pair.b.rel
+
+    def test_b_records_keep_both(self, root, monkeypatch):
+        pair, fa, fb = self._dup_library_pair(root)
+        answers = iter(["b", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.kept == 1
+        assert fa.exists() and fb.exists()
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "keep_both"
+
+    def test_v_renames_and_records(self, root, monkeypatch):
+        pair, fa, _fb = self._dup_library_pair(root)
+        answers = iter(["v", "a", "Live", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.renamed == 1
+        assert (root / "Library" / "Album A" / "Song [Live].flac").exists()
+        assert not fa.exists()
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "rename"
+        assert d["renames"][0]["from"] == pair.a.rel
+        assert d["renames"][0]["to"] == "Library/Album A/Song [Live].flac"
+
+    def test_second_round_sees_no_obsolete_pair(self, root, monkeypatch):
+        # after [l], the pair must not be offered again in the same run
+        pair, _fa, _fb = self._dup_library_pair(root)
+        answers = iter(["s", "l", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.quarantined == 1
+        assert len(stats.remaining) == 0

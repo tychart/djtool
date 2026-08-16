@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-djtool = "djtool.core:main"
+djtool = "djtool.cli:main"
 
 [dependency-groups]
 dev = [
