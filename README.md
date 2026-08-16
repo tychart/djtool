@@ -6,12 +6,18 @@ quarantines files into `.Trash/YYYY-MM-DD/`.
 
 ```
 DJ/
-├── djtool.toml              # your config ([sync], ...) — travels with the collection
 ├── Library/                 # read-only Beets mirror — never modified
 ├── Tracks/                  # canonical DJ tracks (edits, remixes, clean versions…)
 ├── Incoming/                # staging area, reviewed before promotion
-└── djtool/                  # this repository (uv-managed Python package)
+└── djtool/                  # the whole tool — self-contained (uv project + git repo)
+    ├── djtool.toml          # your config ([sync], …)
+    ├── .djtool-cache.json   # disposable derived-data cache
+    └── …                    # package, tests, .venv (git-ignored)
 ```
+
+The tool is fully self-contained: the config and the derived-data cache live
+inside the `djtool/` project folder, so everything travels with your DJ folder
+as one unit.
 
 ## Setup
 
@@ -65,19 +71,24 @@ it also promotes the Incoming copy to `Tracks/`); `[p]`/`[o]` play files via
 
 ## Cache
 
-`.djtool-cache.json` sits at the DJ root and stores **derived data only**
-(hashes, durations, parsed tags, fingerprints), invalidated by file size +
-mtime. Deleting it (`djtool cache clear`) can never lose collection state or
-review decisions.
+`.djtool-cache.json` lives inside the `djtool/` project folder and stores
+**derived data only** (hashes, durations, parsed tags, fingerprints), invalidated
+by file size + mtime. It is tagged with the DJ root it was built for, so a copy
+of the project pointed at a different collection simply rebuilds it. Deleting it
+(`djtool cache clear`) can never lose collection state or review decisions.
 
 ## Sync
 
-Configured in `djtool.toml` (`[sync]`). `push` treats the Desktop as
+Configured in `djtool/djtool.toml` (`[sync]`). `push` treats the Desktop as
 authoritative, `pull` the Laptop; the exact direction is always shown before
 anything happens. `--delete` is opt-in and still requires confirmation.
 Mixxx settings are synced as one coherent state: the command refuses to run
 when Mixxx appears to be running locally, and warns when the remote state
 cannot be verified. SQLite databases are never merged — they are copied whole.
+
+The DJ sync excludes collection quarantine (`.Trash`) and project internals
+(`.venv`, `.git`, `__pycache__`, the cache) — the remote receives code and
+config, not machinery.
 
 ## Development
 

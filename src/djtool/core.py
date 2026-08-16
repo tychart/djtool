@@ -3,12 +3,13 @@
 Filesystem model
 ----------------
     DJ/
-    ├── djtool.toml          configuration ([sync], etc.)
     ├── Library/             read-only Beets mirror — NEVER modified by djtool
     ├── Tracks/              canonical DJ tracks (edits, remixes, clean versions, ...)
     ├── Incoming/            staging area, reviewed before promotion
-    └── .Trash/YYYY-MM-DD/   quarantine for files removed during review
-    └── .djtool-cache.json   disposable derived-data cache (never decisions)
+    ├── .Trash/YYYY-MM-DD/   quarantine for files removed during review
+    └── djtool/              the tool itself — self-contained (uv project + git repo)
+        ├── djtool.toml      configuration ([sync], etc.)
+        └── .djtool-cache.json   disposable derived-data cache (never decisions)
 
 Duplicate-detection pipeline (progressively more expensive)
 ------------------------------------------------------------
@@ -96,6 +97,19 @@ MUTAGEN_READABLE = AUDIO_EXTS - {".aac"}
 TRASH_DIR_NAME = ".Trash"
 CACHE_FILE_NAME = ".djtool-cache.json"
 CONFIG_FILE_NAME = "djtool.toml"
+CACHE_VERSION = 2
+
+# rsync excludes: collection state plus Python/venv artifacts that live inside
+# the djtool/ project folder (which is under the DJ root and gets synced too).
+SYNC_EXCLUDES = [
+    TRASH_DIR_NAME,
+    CACHE_FILE_NAME,
+    ".venv",
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    "*.egg-info",
+]
 
 SOURCES = ("library", "tracks", "incoming")
 SOURCE_DIRS = {"library": "Library", "tracks": "Tracks", "incoming": "Incoming"}
@@ -529,25 +543,44 @@ def sha256_file(path: Path) -> str:
 
 
 # --------------------------------------------------------------------------
+# Project state directory (config + cache live with the tool, not the library)
+# --------------------------------------------------------------------------
+
+
+def project_dir() -> Path:
+    """Root of the djtool project itself (holds djtool.toml and the cache).
+
+    djtool is run from its own uv project (editable install), so the package
+    lives at <project>/src/djtool/. Falls back to the package dir otherwise.
+    """
+    return Path(__file__).resolve().parent.parent.parent
+
+
+# --------------------------------------------------------------------------
 # Cache (.djtool-cache.json) — derived data only, invalidated by size+mtime
 # --------------------------------------------------------------------------
 
 
-def cache_path(root: Path) -> Path:
-    return root / CACHE_FILE_NAME
+def cache_path() -> Path:
+    return project_dir() / CACHE_FILE_NAME
 
 
 def load_cache(root: Path) -> dict[str, Any]:
-    p = cache_path(root)
+    """Load the cache; entries are only usable when tagged with this DJ root."""
+    p = cache_path()
     if not p.exists():
-        return {"version": 1, "entries": {}}
+        return {"version": CACHE_VERSION, "root": str(root), "entries": {}}
     try:
         data = json.loads(p.read_text())
-        if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+        if (
+            isinstance(data, dict)
+            and data.get("root") == str(root)
+            and isinstance(data.get("entries"), dict)
+        ):
             return data
     except (OSError, ValueError):
         pass
-    return {"version": 1, "entries": {}}
+    return {"version": CACHE_VERSION, "root": str(root), "entries": {}}
 
 
 def cache_valid(entry: Any, size: int, mtime_ns: int) -> bool:
@@ -559,15 +592,15 @@ def cache_valid(entry: Any, size: int, mtime_ns: int) -> bool:
 
 
 def save_cache(root: Path, entries: dict[str, Any]) -> None:
-    data = {"version": 1, "entries": entries}
-    tmp = cache_path(root).with_suffix(".tmp")
+    data = {"version": CACHE_VERSION, "root": str(root), "entries": entries}
+    tmp = cache_path().with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=1, sort_keys=True))
-    os.replace(tmp, cache_path(root))
+    os.replace(tmp, cache_path())
 
 
-def clear_cache(root: Path) -> None:
+def clear_cache() -> None:
     try:
-        cache_path(root).unlink()
+        cache_path().unlink()
     except FileNotFoundError:
         pass
 
@@ -1258,8 +1291,9 @@ def review_pairs(
 # --------------------------------------------------------------------------
 
 
-def load_config(root: Path) -> dict[str, Any]:
-    p = root / CONFIG_FILE_NAME
+def load_config() -> dict[str, Any]:
+    """Load <project>/djtool.toml. Returns {} when the file is absent."""
+    p = config_path()
     if not p.exists():
         return {}
     if not HAVE_TOML:
@@ -1268,6 +1302,10 @@ def load_config(root: Path) -> dict[str, Any]:
         return tomllib.loads(p.read_text())
     except tomllib.TOMLDecodeError as e:  # type: ignore[attr-defined]
         raise ConfigError(f"invalid {CONFIG_FILE_NAME}: {e}") from None
+
+
+def config_path() -> Path:
+    return project_dir() / CONFIG_FILE_NAME
 
 
 @dataclass
@@ -1279,11 +1317,11 @@ class SyncConfig:
 
 
 def load_sync_config(root: Path) -> tuple[Optional[SyncConfig], str]:
-    cfg = load_config(root)
+    cfg = load_config()
     section = cfg.get("sync") or {}
     missing = [k for k in ("remote", "remote_dj") if not section.get(k)]
     if missing:
-        return None, f"[sync] in {CONFIG_FILE_NAME} is missing: {', '.join(missing)}"
+        return None, f"[sync] in {CONFIG_FILE_NAME} ({config_path()}) is missing: {', '.join(missing)}"
     return SyncConfig(
         remote=section["remote"],
         remote_dj=section["remote_dj"],
@@ -1304,7 +1342,8 @@ def build_rsync_cmd(src: str, dst: str, dry_run: bool, delete: bool) -> list[str
         cmd.append("-n")
     if delete:
         cmd.append("--delete")
-    cmd += ["--exclude", TRASH_DIR_NAME, "--exclude", CACHE_FILE_NAME]
+    for pattern in SYNC_EXCLUDES:
+        cmd += ["--exclude", pattern]
     cmd += [src, dst]
     return cmd
 
@@ -1461,6 +1500,7 @@ def _tool_version(exe: str, args: list[str]) -> str:
 def cmd_doctor(args: argparse.Namespace, console: Console, root: Path) -> int:
     console.out(f"DJ root:          {root}")
     console.out(f"Python:           {sys.version.split()[0]}  ({sys.executable})")
+    console.out(f"Project:          {project_dir()}  (config + cache live here)")
     console.out("")
     console.out(f"mutagen:          {'installed' if HAVE_MUTAGEN else console.red('MISSING')}"
                 f" — {'tag metadata available' if HAVE_MUTAGEN else 'install with: uv sync (in djtool/); tags fall back to filenames'}")
@@ -1493,10 +1533,10 @@ def cmd_doctor(args: argparse.Namespace, console: Console, root: Path) -> int:
         else:
             console.out(f"  {'Library':<10}not writable (good)")
     console.out("")
-    cfg_file = root / CONFIG_FILE_NAME
+    cfg_file = config_path()
     if cfg_file.exists():
         try:
-            cfg = load_config(root)
+            cfg = load_config()
         except ConfigError as e:
             console.out(f"Config:           {console.red(str(e))}")
             return 0
@@ -1510,7 +1550,7 @@ def cmd_doctor(args: argparse.Namespace, console: Console, root: Path) -> int:
             parts.append("[sync] not configured (optional)")
         console.out("Config:           " + ", ".join(parts))
     else:
-        console.out(f"Config:           {CONFIG_FILE_NAME} not present (optional; needed for sync)")
+        console.out(f"Config:           {cfg_file} not present (optional; needed for sync)")
     console.out("")
     console.out("Reminder: Library/ is strictly read-only. Tracks/ and Incoming/ are writable.")
     return 0
@@ -1648,9 +1688,9 @@ def cmd_trash(args: argparse.Namespace, console: Console, root: Path) -> int:
 
 
 def cmd_cache(args: argparse.Namespace, console: Console, root: Path) -> int:
-    p = cache_path(root)
+    p = cache_path()
     if args.cache_action == "clear":
-        clear_cache(root)
+        clear_cache()
         console.info("cache cleared — nothing was lost; the next scan will just be slower")
         return 0
     if not p.exists():

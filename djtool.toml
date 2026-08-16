@@ -1,8 +1,5 @@
-# djtool configuration — example template (copy to the DJ root as djtool.toml).
-#
-# The real configuration lives at the DJ root, next to Library/, Tracks/ and
-# Incoming/ (the tool looks for <DJ root>/djtool.toml). Uncomment and edit the
-# values below, then delete this file.
+# djtool configuration — lives in the djtool/ project folder (self-contained).
+# The whole tool, config and cache travel together when you copy the project.
 
 [sync]
 # SSH target for rsync, e.g. "user@laptop"

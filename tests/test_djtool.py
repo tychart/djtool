@@ -353,14 +353,24 @@ class TestCache:
         assert dt.load_cache(root)["entries"] == entries
         assert dt.cache_valid(entries["Incoming/a.flac"], 5, 1)
         assert not dt.cache_valid(entries["Incoming/a.flac"], 5, 2)
-        dt.clear_cache(root)
+        dt.clear_cache()
         assert dt.load_cache(root)["entries"] == {}
+
+    def test_cache_root_tagged(self, tmp_path: Path):
+        root_a = tmp_path / "dj-a"
+        root_a.mkdir()
+        root_b = tmp_path / "dj-b"
+        root_b.mkdir()
+        dt.save_cache(root_a, {"Library/a.flac": {"size": 5, "mtime_ns": 1, "sha256": "aa"}})
+        # A different collection (or a copied project) must not reuse the data
+        assert dt.load_cache(root_b)["entries"] == {}
+        assert dt.load_cache(root_a)["entries"] == {"Library/a.flac": {"size": 5, "mtime_ns": 1, "sha256": "aa"}}
 
     def test_cache_never_stores_decisions(self, tmp_path: Path):
         root = tmp_path / "dj"
         root.mkdir()
         dt.save_cache(root, {"Incoming/a.flac": {"size": 5, "mtime_ns": 1, "sha256": "ab"}})
-        raw = (root / ".djtool-cache.json").read_text()
+        raw = dt.cache_path().read_text()
         assert "quarantine" not in raw and "decision" not in raw
 
 
@@ -420,7 +430,9 @@ class TestSync:
 
     def test_rsync_cmd_excludes_state(self):
         cmd = dt.build_rsync_cmd("a/", "b/", dry_run=False, delete=False)
-        assert "--exclude" in cmd and ".Trash" in cmd and ".djtool-cache.json" in cmd
+        assert "--exclude" in cmd
+        for pattern in (".Trash", ".djtool-cache.json", ".venv", ".git", "__pycache__"):
+            assert pattern in cmd
 
     def test_plan_sync_directions(self, root):
         cfg = dt.SyncConfig(
@@ -588,7 +600,7 @@ class TestConfig:
     def test_load_sync_config_present(self, tmp_path: Path):
         dj = tmp_path / "dj"
         dj.mkdir()
-        (dj / "djtool.toml").write_text(
+        dt.config_path().write_text(
             '[sync]\nremote = "user@laptop"\nremote_dj = "/home/user/Music/DJ"\n'
             'local_mixxx = "/home/user/.mixxx"\n'
         )
@@ -601,6 +613,6 @@ class TestConfig:
     def test_bad_toml_raises(self, tmp_path: Path):
         dj = tmp_path / "dj"
         dj.mkdir()
-        (dj / "djtool.toml").write_text("[sync\nnope")
+        dt.config_path().write_text("[sync\nnope")
         with pytest.raises(dt.ConfigError):
-            dt.load_config(dj)
+            dt.load_config()
