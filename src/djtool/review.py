@@ -22,11 +22,22 @@ from djtool.promote import _ask_version, promote_to_tracks
 from djtool.quarantine import quarantine_file, quarantine_library_file
 
 
-def action_keep_preferred(root: Path, pair: Pair, mode: str) -> str:
-    """[l] Keep the preferred file (A), quarantine B. Returns an action name."""
-    if pair.b.source == "library":
-        return "refused"  # both files are in the read-only Library
-    quarantine_file(root, pair.b)
+def action_keep_one(root: Path, pair: Pair, *, keep_a: bool) -> str:
+    """[l]/[j]: keep one member, quarantine the other.
+
+    Works for every pair type. A Library file is only removable when the pair
+    is Library-internal — the removal is recorded to the decisions file so it
+    can be replayed after a Library reset. In cross-source pairs the Library
+    copy is protected and removal is refused.
+    """
+    keep, remove = (pair.a, pair.b) if keep_a else (pair.b, pair.a)
+    if remove.source == "library":
+        if not is_library_pair(pair):
+            return "refused"
+        quarantine_library_file(root, remove)
+        record_remove_decision(root, kept_rel=keep.rel, removed_rel=remove.rel)
+        return "quarantined"
+    quarantine_file(root, remove)
     return "quarantined"
 
 
@@ -38,11 +49,16 @@ def action_keep_both(
     get_input: Callable[[str], str] | None = None,
     console: Console | None = None,
 ) -> str:
-    """[b] Keep both. In ingest mode the Incoming copy is promoted to Tracks.
+    """[b] Keep both.
 
-    Promotion flattens and renames the file ('Title - Artist [Version].ext');
-    a name collision triggers the interactive resolution (version / skip).
+    Library-internal pairs record the decision so the pair never re-asks after
+    a Library reset. In ingest mode the Incoming copy is promoted to Tracks
+    (flat, renamed; a name collision triggers the interactive version/skip
+    resolution).
     """
+    if is_library_pair(pair):
+        record_keep_both_decision(root, pair.a.rel, pair.b.rel)
+        return "kept"
     if mode == "ingest":
         targets = [t for t in (pair.a, pair.b) if t.source == "incoming" and t.path.exists()]
         moved = False
@@ -59,26 +75,6 @@ def action_keep_both(
 def is_library_pair(pair: Pair) -> bool:
     """Both members live in the read-only Library (the recorded-decisions case)."""
     return pair.a.source == "library" and pair.b.source == "library"
-
-
-def action_keep_preferred_library(root: Path, pair: Pair, console: Console) -> str:
-    """[l] for Library-internal pairs: keep A, remove B, record the decision."""
-    quarantine_library_file(root, pair.b)
-    record_remove_decision(root, kept_rel=pair.a.rel, removed_rel=pair.b.rel)
-    return "quarantined"
-
-
-def action_keep_b_library(root: Path, pair: Pair, console: Console) -> str:
-    """[j] for Library-internal pairs: keep B, remove A, record the decision."""
-    quarantine_library_file(root, pair.a)
-    record_remove_decision(root, kept_rel=pair.b.rel, removed_rel=pair.a.rel)
-    return "quarantined"
-
-
-def action_keep_both_library(root: Path, pair: Pair, console: Console) -> str:
-    """[b] for Library-internal pairs: keep both, record so it never re-asks."""
-    record_keep_both_decision(root, pair.a.rel, pair.b.rel)
-    return "kept"
 
 
 def action_version_library(
@@ -195,7 +191,7 @@ def render_pair(pair: Pair, index: int, total: int, round_no: int, console: Cons
         console.out(f"[l] {keep}    [b] Keep both    [p] Play A    [o] Play B")
     else:
         keep = "Keep A / remove B"
-        console.out(f"[l] {keep}    [b] Keep both    [p] Play A    [o] Play B")
+        console.out(f"[l] {keep}    [j] Keep B / remove A    [b] Keep both    [p] Play A    [o] Play B")
     console.out("[c] Compare audio (A then B)    [i] More info    [s] Skip for now    [q] Quit safely")
     if mode == "ingest":
         console.out(console.dim("[b] in ingest mode promotes the Incoming copy to Tracks/ (flat, renamed)."))
@@ -262,24 +258,20 @@ def review_pairs(
                 quit_remaining = round_pairs[idx - 1:] + pending
                 break
             if choice == "l":
-                if lib_pair:
-                    res = action_keep_preferred_library(root, pair, console)
+                res = action_keep_one(root, pair, keep_a=True)
+                if res == "quarantined":
                     stats.quarantined += 1
-                else:
-                    res = action_keep_preferred(root, pair, mode)
-                    if res == "quarantined":
-                        stats.quarantined += 1
-                    elif res == "refused":
-                        console.warn("both files are in the read-only Library — keeping both")
-                        stats.kept += 1
+                elif res == "refused":
+                    console.warn("both files are in the read-only Library — keeping both")
+                    stats.kept += 1
                 stats.processed += 1
             elif choice == "j":
-                if not lib_pair:
-                    console.out(console.dim("[j] is only available when both files are in Library/"))
-                    pending.append(pair)
-                    continue
-                action_keep_b_library(root, pair, console)
-                stats.quarantined += 1
+                res = action_keep_one(root, pair, keep_a=False)
+                if res == "quarantined":
+                    stats.quarantined += 1
+                elif res == "refused":
+                    console.warn("Library/ is read-only — keep the Library copy instead ([l])")
+                    stats.kept += 1
                 stats.processed += 1
             elif choice == "v":
                 if not lib_pair:
@@ -294,15 +286,11 @@ def review_pairs(
                     if res == "renamed":
                         stats.renamed += 1
             elif choice == "b":
-                if lib_pair:
-                    action_keep_both_library(root, pair, console)
-                    stats.kept += 1
+                res = action_keep_both(root, pair, mode, get_input=read, console=console)
+                if res == "promoted":
+                    stats.promoted += 1
                 else:
-                    res = action_keep_both(root, pair, mode, get_input=read, console=console)
-                    if res == "promoted":
-                        stats.promoted += 1
-                    else:
-                        stats.kept += 1
+                    stats.kept += 1
                 stats.processed += 1
             elif choice == "p":
                 play_audio(pair.a.path, console, "A")
@@ -322,8 +310,8 @@ def review_pairs(
                 if round_no == 1:
                     pending.append(pair)  # one more chance in the next round
             else:
-                console.out(console.dim("choices: [l] keep A / remove B  [b] keep both  [p]/[o] play  "
-                                        "[c] compare  [i] info  [s] skip  [q] quit"))
+                console.out(console.dim("choices: [l] keep A / remove B  [j] keep B / remove A  [b] keep both  "
+                                        "[p]/[o] play  [c] compare  [i] info  [s] skip  [q] quit"))
                 pending.append(pair)
         round_no += 1
         if pending and not quit_now:

@@ -99,7 +99,7 @@ from djtool.quarantine import (
 )
 from djtool.review import (
     action_keep_both,
-    action_keep_preferred,
+    action_keep_one,
     is_library_pair,
     print_info,
     render_pair,
@@ -136,7 +136,7 @@ __all__ = [
     "AUDIO_EXTS", "AUDIO_LABELS", "CATEGORIES", "ConfigError", "ConfirmationRequired",
     "Console", "DjToolError", "FPCALC", "HAVE_MUTAGEN", "MUTAGEN_READABLE", "NameCollision",
     "Pair", "SOURCES", "SOURCE_DIRS", "SOURCE_RANK", "ScanStats", "SyncConfig", "Track",
-    "action_keep_both", "action_keep_preferred", "build_rsync_cmd", "cache_path", "cache_valid",
+    "action_keep_both", "action_keep_one", "build_rsync_cmd", "cache_path", "cache_valid",
     "canonicalize_version", "classify", "clear_cache", "clear_decisions", "compute_fingerprint",
     "config_path", "core_of", "decisions_path", "delete_decision", "derive_track_name",
     "describe_decision", "describe_format", "detect_root", "display_artist", "display_title",

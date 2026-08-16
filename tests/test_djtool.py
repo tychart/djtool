@@ -211,11 +211,40 @@ class TestLibraryPreference:
         a, b = dt.order_pair(inc, trk)
         assert a.source == "tracks" and b.source == "incoming"
 
-    def test_keep_preferred_never_moves_library(self, root):
-        l1 = make_track(root, "library", "a.flac")
-        l2 = make_track(root, "library", "b.flac")
+    def test_keep_one_refuses_library_removal_in_cross_source_pair(self, root):
+        libf = root / "Library" / "Song.flac"
+        libf.write_bytes(b"x")
+        trkf = root / "Tracks" / "Song.flac"
+        trkf.write_bytes(b"y")
+        lib = make_track(root, "library", "Song.flac", path=libf, size=1,
+                         title="Song", artist="Artist")
+        trk = make_track(root, "tracks", "Song.flac", path=trkf, size=1,
+                         title="Song", artist="Artist")
+        pair = dt.make_pair(lib, trk)  # A = Library copy
+        # [l] keeps the Library copy and removes the other side
+        assert dt.action_keep_one(root, pair, keep_a=True) == "quarantined"
+        assert libf.exists() and not trkf.exists()
+        # [j] would remove the Library copy — refused (Library is read-only
+        # unless the pair is Library-internal and the decision is recorded)
+        assert dt.action_keep_one(root, pair, keep_a=False) == "refused"
+        assert libf.exists()
+
+    def test_keep_one_records_library_internal_removals(self, root):
+        l1f = root / "Library" / "Album A" / "Song.flac"
+        l2f = root / "Library" / "Album B" / "Song.flac"
+        l1f.parent.mkdir(parents=True)
+        l1f.write_bytes(b"x")
+        l2f.parent.mkdir(parents=True)
+        l2f.write_bytes(b"y")
+        l1 = make_track(root, "library", "Album A/Song.flac", path=l1f, size=1,
+                        title="Song", artist="Artist")
+        l2 = make_track(root, "library", "Album B/Song.flac", path=l2f, size=1,
+                        title="Song", artist="Artist")
         pair = dt.make_pair(l1, l2)
-        assert dt.action_keep_preferred(root, pair, mode="dedupe") == "refused"
+        assert dt.action_keep_one(root, pair, keep_a=True) == "quarantined"
+        assert l1f.exists() and not l2f.exists()
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "remove" and d["kept"] == pair.a.rel and d["removed"] == pair.b.rel
 
 
 # ---------------------------------------------------------------------------
@@ -1013,3 +1042,39 @@ class TestLibraryPairReview:
         monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
         stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
         assert stats.skipped == 1  # 's' was consumed by the same pair after info
+
+    def test_j_removes_a_on_tracks_pair(self, root, monkeypatch):
+        # [j] keep B / remove A must work for any writable-writable pair
+        ta = root / "Tracks" / "One.flac"
+        ta.write_bytes(b"a")
+        tb = root / "Tracks" / "Two.flac"
+        tb.write_bytes(b"b")
+        track_a = make_track(root, "tracks", "One.flac", path=ta, size=1,
+                             title="Song", artist="Artist")
+        track_b = make_track(root, "tracks", "Two.flac", path=tb, size=1,
+                             title="Song", artist="Artist")
+        pair = dt.make_pair(track_a, track_b)  # a = One.flac (path order)
+        answers = iter(["j", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.quarantined == 1
+        assert not ta.exists() and tb.exists()
+        # writable-writable decisions are never recorded
+        assert dt.load_decisions(root)["decisions"] == []
+
+    def test_j_refused_when_a_is_library(self, root, monkeypatch):
+        libf = root / "Library" / "Song.flac"
+        libf.write_bytes(b"x")
+        trkf = root / "Tracks" / "Song.flac"
+        trkf.write_bytes(b"y")
+        lib = make_track(root, "library", "Song.flac", path=libf, size=1,
+                         title="Song", artist="Artist")
+        trk = make_track(root, "tracks", "Song.flac", path=trkf, size=1,
+                         title="Song", artist="Artist")
+        pair = dt.make_pair(lib, trk)
+        answers = iter(["j", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.quarantined == 0 and stats.kept == 1
+        assert libf.exists() and trkf.exists()
+        assert dt.load_decisions(root)["decisions"] == []
