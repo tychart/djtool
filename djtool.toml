@@ -1,9 +1,15 @@
-# djtool configuration — lives in the djtool/ project folder (self-contained).
-# The whole tool, config and cache travel together when you copy the project.
+# djtool configuration — lives in the djtool/ project folder.
+# The DJ collection can live anywhere; it is referenced from here.
+
+[collection]
+# Root of the DJ collection: the folder containing Library/, Tracks/ and
+# Incoming/. Set this when djtool lives outside the collection.
+root = "/home/tychart/Music/DJ"
 
 [sync]
-# SSH target for rsync, e.g. "user@laptop"
-# remote = "user@laptop"
+# SSH target for rsync — any host reachable over SSH (IP or DNS name),
+# e.g. "user@192.168.1.50" or "user@mymusicbox.local".
+# remote = "user@host"
 # Remote path of the DJ root on that host
 # remote_dj = "/home/user/Music/DJ"
 # Mixxx settings directories (optional but recommended):

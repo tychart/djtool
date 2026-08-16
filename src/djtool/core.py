@@ -2,14 +2,11 @@
 
 Filesystem model
 ----------------
-    DJ/
+    DJ/                        location configured in djtool.toml ([collection] root)
     ├── Library/             read-only Beets mirror — NEVER modified by djtool
-    ├── Tracks/              canonical DJ tracks (edits, remixes, clean versions, ...)
+    ├── Tracks/              canonical DJ tracks — flat, 'Title - Artist [Version].ext'
     ├── Incoming/            staging area, reviewed before promotion
-    ├── .Trash/YYYY-MM-DD/   quarantine for files removed during review
-    └── djtool/              the tool itself — self-contained (uv project + git repo)
-        ├── djtool.toml      configuration ([sync], etc.)
-        └── .djtool-cache.json   disposable derived-data cache (never decisions)
+    └── .Trash/YYYY-MM-DD/   quarantine (flattened; hidden folder Mixxx never scans)
 
 Duplicate-detection pipeline (progressively more expensive)
 ------------------------------------------------------------
@@ -41,11 +38,12 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence
+from typing import Any
 
 try:
     import mutagen  # noqa: F401
@@ -199,13 +197,28 @@ class ConfirmationRequired(DjToolError):
     """A destructive action needs explicit confirmation."""
 
 
+class NameCollision(DjToolError):
+    """Promotion would clash with an existing Tracks file and needs a decision.
+
+    Raised only for non-interactive callers; the CLI resolves collisions
+    interactively instead. Collisions are never resolved by appending numbers.
+    """
+
+    def __init__(self, track: Track, target: Path):
+        self.track = track
+        self.target = target
+        super().__init__(
+            f"'{track.rel}' would collide with existing '{target.name}' in Tracks/"
+        )
+
+
 # --------------------------------------------------------------------------
 # Console (ANSI colors, usable without them)
 # --------------------------------------------------------------------------
 
 
 class Console:
-    def __init__(self, color: Optional[bool] = None):
+    def __init__(self, color: bool | None = None):
         if color is None:
             color = (
                 sys.stdout.isatty()
@@ -256,7 +269,7 @@ class Console:
 # --------------------------------------------------------------------------
 
 
-def normalize_text(s: Optional[str]) -> str:
+def normalize_text(s: str | None) -> str:
     """Normalize a string for comparison: unicode, case, punctuation, whitespace.
 
     Keeps letters, digits, whitespace and apostrophes. Ampersands become
@@ -296,7 +309,7 @@ def core_of(normalized: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def guess_from_filename(stem: str) -> tuple[Optional[str], Optional[str]]:
+def guess_from_filename(stem: str) -> tuple[str | None, str | None]:
     """Guess (artist, title) from a filename stem. Heuristic, best-effort.
 
     Recognizes 'Artist - Title', '01 - Artist - Title', en/em dashes, and a
@@ -330,6 +343,215 @@ def text_sim(a: str, b: str) -> float:
 
 
 # --------------------------------------------------------------------------
+# Track filename scheme: 'Title - Artist [Version].ext'
+# --------------------------------------------------------------------------
+
+# Canonical spellings for common version labels (key = normalized phrase).
+# A value of None means "drop this phrase" — 'original version' is the default
+# state of a track, not a useful discriminator.
+VERSION_CANON: dict[str, str | None] = {
+    "clean version": "Clean",
+    "clean": "Clean",
+    "clean radio edit": "Clean Radio Edit",
+    "explicit version": "Explicit",
+    "explicit": "Explicit",
+    "explicit radio edit": "Explicit Radio Edit",
+    "radio edit": "Radio Edit",
+    "radio mix": "Radio Mix",
+    "radio version": "Radio Edit",
+    "single edit": "Single Edit",
+    "single version": "Single Version",
+    "album version": "Album Version",
+    "extended": "Extended",
+    "extended mix": "Extended Mix",
+    "extended edit": "Extended Edit",
+    "extended intro": "Extended Intro",
+    "extended club mix": "Extended Club Mix",
+    "dj intro": "DJ Intro",
+    "dj intro clean": "DJ Intro Clean",
+    "dj edit": "DJ Edit",
+    "instrumental": "Instrumental",
+    "instrumental mix": "Instrumental",
+    "acapella": "Acapella",
+    "a capella": "Acapella",
+    "a cappella": "Acapella",
+    "live": "Live",
+    "remix": "Remix",
+    "remaster": "Remaster",
+    "remastered": "Remaster",
+    "remastered version": "Remaster",
+    "original mix": "Original Mix",
+    "original version": None,
+    "club mix": "Club Mix",
+    "dub mix": "Dub Mix",
+    "rework": "Rework",
+    "unplugged": "Unplugged",
+    "acoustic": "Acoustic",
+    "reprise": "Reprise",
+    "demo": "Demo",
+    "deluxe": "Deluxe",
+    "bonus": "Bonus",
+    "orchestral": "Orchestral",
+    "12 inch": "12 Inch",
+    "7 inch": "7 Inch",
+}
+
+# Words that mark a parenthesized/bracketed group as a *version* group rather
+# than part of the title ("(Radio Edit)" vs. "('Til Monday)"). Word-boundary
+# matched, so "(Cocktail Mixer)" is not mistaken for a version.
+_VERSION_GROUP_MARKERS = (
+    "12 inch", "7 inch", "acapella", "acoustic", "album", "bonus",
+    "capella", "cappella", "clean", "club", "deluxe", "demo", "dj",
+    "dub", "edit", "explicit", "extended", "inch", "instrumental",
+    "intro", "karaoke", "live", "mix", "orchestral", "original", "radio",
+    "reissue", "remaster", "remix", "reprise", "rework", "single",
+    "unplugged", "version",
+)
+_VERSION_GROUP_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(m) for m in _VERSION_GROUP_MARKERS) + r")\b",
+    re.IGNORECASE,
+)
+_PAREN_RE = re.compile(r"[(\[][^()\[\]]*[)\]]")
+
+
+def _canonical_phrases(s: str) -> list[str]:
+    """Split a raw version string into canonical phrases, longest match first.
+
+    Known phrases map onto the version vocabulary ('RADIO EDIT' -> 'Radio Edit'),
+    unknown words are capitalized ('The Blessed Madonna Remix' keeps its name),
+    and drop-marked phrases ('original version') are omitted.
+    """
+    words = normalize_text(s or "").split()
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        for n in range(min(4, len(words) - i), 0, -1):
+            phrase = " ".join(words[i:i + n])
+            if phrase in VERSION_CANON:
+                canon = VERSION_CANON[phrase]
+                if canon:
+                    out.append(canon)
+                i += n
+                break
+        else:
+            w = words[i]
+            out.append("DJ" if w == "dj" else w.capitalize())
+            i += 1
+    return out
+
+
+def canonicalize_version(*parts: str) -> str:
+    """Combine raw version fragments into one canonical label, deduplicated."""
+    out: list[str] = []
+    for p in parts:
+        for phrase in _canonical_phrases(p):
+            if phrase and phrase not in out:
+                out.append(phrase)
+    return " ".join(out)
+
+
+def _extract_groups(t: str) -> tuple[list[str], str]:
+    """Pull version-looking (…) / […] groups out of a title, leaving the rest."""
+    groups: list[str] = []
+    kept: list[str] = []
+    pos = 0
+    for m in _PAREN_RE.finditer(t):
+        inner = m.group(0)[1:-1].strip()
+        if inner and _VERSION_GROUP_RE.search(inner):
+            groups.append(inner)
+            kept.append(t[pos:m.start()])
+            pos = m.end()
+    kept.append(t[pos:])
+    return groups, "".join(kept)
+
+
+def extract_version(title: str) -> tuple[str, str]:
+    """Split a title into (base title, version label).
+
+    Recognizes parenthesized/bracketed groups that look like versions and a
+    trailing version phrase: 'Song (Clean Radio Edit)' -> ('Song', 'Clean Radio Edit'),
+    'Song - Radio Edit' -> ('Song', 'Radio Edit'), 'Song' -> ('Song', '').
+    Groups that do not look like versions stay in the base title.
+    """
+    if not title:
+        return "", ""
+    t = title.strip()
+    groups, t = _extract_groups(t)
+    parts = re.split(r"\s+", t.strip())
+    trailing: list[str] = []
+    while True:
+        for n in range(min(4, len(parts)), 0, -1):
+            phrase = " ".join(parts[-n:])
+            if normalize_text(phrase) in VERSION_CANON:
+                trailing = parts[-n:] + trailing
+                parts = parts[:-n]
+                break
+        else:
+            break
+    base = re.sub(r"[\s\-–—]+$", "", " ".join(parts)).strip()
+    version = canonicalize_version(*groups, *trailing)
+    return base, version
+
+
+_FILENAME_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def sanitize_filename_part(s: str, fallback: str = "") -> str:
+    """Make a string safe to use as one filename component (best-effort)."""
+    s = _FILENAME_BAD.sub("", s or "")
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    return s or fallback
+
+
+def simplify_artist(artist: str) -> str:
+    """Normalize messy multi-artist credits for filenames, never for tags.
+
+    'A, B, A feat. B' -> 'A, B' (deduplicated, order preserved); overlong
+    credits are truncated.
+    """
+    parts = [p.strip() for p in re.split(r"\s*,\s*", artist or "") if p.strip()]
+    seen: list[str] = []
+    for p in parts:
+        if normalize_text(p) not in {normalize_text(s) for s in seen}:
+            seen.append(p)
+    out = ", ".join(seen) if len(seen) > 1 else (seen[0] if seen else (artist or "").strip())
+    if len(out) > 80:
+        out = out[:77].rstrip() + "…"
+    return out
+
+
+def _stem_base(stem: str) -> str:
+    """Strip a trailing '[Version]' group from a filename stem."""
+    return re.sub(r"\s*\[[^\[\]]*\]\s*$", "", stem or "").strip()
+
+
+def derive_track_name(track: Track) -> str:
+    """Derive the flat Tracks/ filename: 'Title - Artist [Version].ext'.
+
+    Uses tags when present, otherwise best-effort filename parsing. When
+    nothing can be derived the original filename is kept (still flattened).
+    """
+    ext = track.path.suffix.lower()
+    title = (track.title or track.filename_title or "").strip()
+    artist = (track.artist or track.filename_artist or "").strip()
+    if not title and not artist:
+        return track.path.name
+    base_title, version = extract_version(title)
+    parts: list[str] = []
+    if base_title:
+        parts.append(sanitize_filename_part(base_title))
+    if artist:
+        artist = simplify_artist(artist)
+        if artist:
+            parts.append(sanitize_filename_part(artist))
+    base = " - ".join(parts)
+    if version:
+        base = f"{base} [{version}]"
+    base = sanitize_filename_part(base)
+    return f"{base}{ext}" if base else track.path.name
+
+
+# --------------------------------------------------------------------------
 # Track model
 # --------------------------------------------------------------------------
 
@@ -341,15 +563,15 @@ class Track:
     source: str  # one of SOURCES
     size: int
     mtime_ns: int
-    sha256: Optional[str] = None
-    duration: Optional[float] = None  # seconds
+    sha256: str | None = None
+    duration: float | None = None  # seconds
     title: str = ""
     artist: str = ""
     album: str = ""
     track_no: str = ""
     format_desc: str = ""
-    fingerprint: Optional[str] = None  # raw chromaprint, base64
-    fp_duration: Optional[float] = None
+    fingerprint: str | None = None  # raw chromaprint, base64
+    fp_duration: float | None = None
 
     # --- derived views (computed on demand, cached) -----------------------
     @cached_property
@@ -387,7 +609,7 @@ class Track:
 
     def rel_in_source(self) -> str:
         prefix = SOURCE_DIRS[self.source] + "/"
-        return self.rel[len(prefix):] if self.rel.startswith(prefix) else self.rel
+        return self.rel.removeprefix(prefix)
 
 
 def display_artist(t: Track) -> str:
@@ -411,7 +633,7 @@ def display_title(t: Track) -> str:
 # --------------------------------------------------------------------------
 
 
-def _tag_str(v: Any) -> Optional[str]:
+def _tag_str(v: Any) -> str | None:
     if v is None:
         return None
     if isinstance(v, (list, tuple)):
@@ -424,11 +646,11 @@ def _tag_str(v: Any) -> Optional[str]:
     return s or None
 
 
-def _first(tags: Any, *keys: str) -> Optional[str]:
+def _first(tags: Any, *keys: str) -> str | None:
     for key in keys:
         try:
             v = tags.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001, S112 - tag objects vary unpredictably per format
             continue
         s = _tag_str(v)
         if s:
@@ -459,7 +681,7 @@ def read_tags(path: Path) -> tuple[dict[str, Any], Any]:
         else:
             return out, None
         info = f.info
-    except Exception:
+    except Exception:  # noqa: BLE001 - unreadable tags must never raise
         return out, None
     tags = getattr(f, "tags", None) or {}
     out["title"] = _first(tags, "title", "TIT2", "\xa9nam")
@@ -485,6 +707,7 @@ def ffprobe_info(path: Path) -> dict[str, Any]:
                 "-of", "json", str(path),
             ],
             capture_output=True, text=True, timeout=60,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return {}
@@ -510,7 +733,7 @@ def ffprobe_info(path: Path) -> dict[str, Any]:
     return out
 
 
-def describe_format(path: Path, info: Any, probe: Optional[dict[str, Any]] = None) -> str:
+def describe_format(path: Path, info: Any, probe: dict[str, Any] | None = None) -> str:
     """Human-readable format description: 'FLAC 44.1 kHz / 16 bit'."""
     probe = probe or {}
     ext = path.suffix.lower()
@@ -745,13 +968,13 @@ MAX_FP_OFFSET = 32  # frames; ~0.123s each, covers small offsets between recordi
 def _fp_decode(b64: str) -> list[int]:
     try:
         data = base64.b64decode(b64)
-    except Exception:
+    except Exception:  # noqa: BLE001 - corrupt cached fingerprints are skipped
         return []
     words = len(data) // 4
     return [int.from_bytes(data[i * 4:i * 4 + 4], "big") for i in range(words)]
 
 
-def fp_similarity(a: Optional[str], b: Optional[str]) -> Optional[float]:
+def fp_similarity(a: str | None, b: str | None) -> float | None:
     """Similarity in [0,1] between two raw chromaprint fingerprints.
 
     Tries small alignments and reports the best matching-bit fraction.
@@ -770,12 +993,11 @@ def fp_similarity(a: Optional[str], b: Optional[str]) -> Optional[float]:
     for off in range(max_off + 1):
         mismatch = sum((x ^ y).bit_count() for x, y in zip(fa, fb[off:]))
         score = 1.0 - mismatch / total_bits
-        if score > best:
-            best = score
+        best = max(best, score)
     return best
 
 
-def compute_fingerprint(path: Path) -> Optional[tuple[str, float]]:
+def compute_fingerprint(path: Path) -> tuple[str, float] | None:
     """Run fpcalc, return (raw base64 fingerprint, duration) or None."""
     if FPCALC is None:
         return None
@@ -783,13 +1005,14 @@ def compute_fingerprint(path: Path) -> Optional[tuple[str, float]]:
         p = subprocess.run(
             [FPCALC, "-raw", str(path)],
             capture_output=True, text=True, timeout=300,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
     if p.returncode != 0:
         return None
-    fp: Optional[str] = None
-    dur: Optional[float] = None
+    fp: str | None = None
+    dur: float | None = None
     for line in p.stdout.splitlines():
         key, _, value = line.partition("=")
         if key == "FINGERPRINT":
@@ -802,7 +1025,7 @@ def compute_fingerprint(path: Path) -> Optional[tuple[str, float]]:
     return (fp, dur) if fp else None
 
 
-def ensure_fingerprints(pair: "Pair") -> None:
+def ensure_fingerprints(pair: Pair) -> None:
     """Compute fingerprints for a pair (lazily, cached) and re-classify."""
     if pair.category == "EXACT_DUPLICATE" or FPCALC is None:
         return
@@ -829,9 +1052,9 @@ class Pair:
     category: str = ""
     title_sim: float = 0.0
     artist_sim: float = 0.0
-    duration_diff: Optional[float] = None
-    dur_close: Optional[bool] = None
-    fp_sim: Optional[float] = None
+    duration_diff: float | None = None
+    dur_close: bool | None = None
+    fp_sim: float | None = None
     note: str = ""
 
 
@@ -848,8 +1071,8 @@ def make_pair(a: Track, b: Track, exact: bool = False) -> Pair:
     a, b = order_pair(a, b)
     title_sim = text_sim(a.core_title, b.core_title) if (a.core_title and b.core_title) else 0.0
     artist_sim = text_sim(a.core_artist, b.core_artist) if (a.core_artist and b.core_artist) else 0.0
-    duration_diff: Optional[float] = None
-    dur_close: Optional[bool] = None
+    duration_diff: float | None = None
+    dur_close: bool | None = None
     if a.duration is not None and b.duration is not None:
         duration_diff = abs(a.duration - b.duration)
         dur_close = duration_diff <= max(DUR_TOLERANCE_S, DUR_TOLERANCE_FRAC * max(a.duration, b.duration))
@@ -914,13 +1137,11 @@ def classify(p: Pair) -> tuple[str, str]:
 
 def is_candidate(p: Pair) -> bool:
     """Whether a pair is worth showing for review (recall-friendly threshold)."""
-    if p.title_sim >= TITLE_CANDIDATE:
-        return True
-    if p.artist_sim >= 0.9 and p.title_sim >= 0.6:
-        return True
-    if p.dur_close and p.title_sim >= 0.6 and p.artist_sim >= 0.6:
-        return True
-    return False
+    return (
+        p.title_sim >= TITLE_CANDIDATE
+        or (p.artist_sim >= 0.9 and p.title_sim >= 0.6)
+        or (p.dur_close and p.title_sim >= 0.6 and p.artist_sim >= 0.6)
+    )
 
 
 def find_candidates(tracks: list[Track]) -> list[Pair]:
@@ -993,22 +1214,25 @@ def _ensure_within(path: Path, root: Path, what: str) -> None:
         raise ValueError(f"{what} escapes the DJ root: {path}") from None
 
 
-def trash_dir_for(root: Path, when: Optional[datetime] = None) -> Path:
-    return root / TRASH_DIR_NAME / (when or datetime.now()).strftime("%Y-%m-%d")
+def trash_dir_for(root: Path, when: datetime | None = None) -> Path:
+    # Local calendar day is intentional for quarantine folders (DTZ005).
+    return root / TRASH_DIR_NAME / (when or datetime.now()).strftime("%Y-%m-%d")  # noqa: DTZ005
 
 
 def quarantine_file(root: Path, track: Track) -> Path:
-    """Move a non-Library file into .Trash/YYYY-MM-DD/<source>/<relative path>.
+    """Move a non-Library file flat into .Trash/YYYY-MM-DD/<source>/<filename>.
 
-    Preserves the relative path (under the source dir) so collisions cannot
-    occur. Refuses Library files outright.
+    The quarantine is flattened like Tracks/ — Mixxx skips the hidden .Trash
+    folder, so folder structure there has no scanning benefit. Numeric suffixes
+    are acceptable here: .Trash is a temporary recovery area, not the canonical
+    collection. Refuses Library files outright.
     """
     if track.source == "library":
         raise ValueError("refusing to quarantine a Library file (Library is read-only)")
     root = root.resolve()
     src = track.path.resolve()
     _ensure_within(src, root, "source")
-    dest = trash_dir_for(root) / track.source / track.rel_in_source()
+    dest = trash_dir_for(root) / track.source / track.path.name
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest = _unique(dest)
     shutil.move(str(src), str(dest))
@@ -1046,18 +1270,181 @@ def empty_trash(root: Path, yes: bool = False) -> int:
     return n
 
 
-def promote_to_tracks(root: Path, track: Track) -> Path:
-    """Move an Incoming file into Tracks/, preserving its relative path."""
+def promote_to_tracks(
+    root: Path,
+    track: Track,
+    *,
+    get_input: Callable[[str], str] | None = None,
+    console: Console | None = None,
+) -> tuple[Path, str]:
+    """Move an Incoming file flat into Tracks/ as 'Title - Artist [Version].ext'.
+
+    The Incoming/ folder structure is discarded — only the file itself moves,
+    renamed from its tags (filename parsing as fallback). Name collisions are
+    never auto-resolved with numbers: interactive resolution is required, or a
+    NameCollision is raised for non-interactive callers (get_input=None).
+
+    Returns (destination, action) with action in
+    {'promoted', 'renamed', 'renamed-existing', 'renamed-both', 'skipped'}.
+    """
     if track.source != "incoming":
         raise ValueError("only Incoming files can be promoted to Tracks")
     root = root.resolve()
     src = track.path.resolve()
     _ensure_within(src, root, "source")
-    dest = root / SOURCE_DIRS["tracks"] / track.rel_in_source()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest = _unique(dest)
+    dest = root / SOURCE_DIRS["tracks"] / derive_track_name(track)
+    if dest.exists():
+        if get_input is None:
+            raise NameCollision(track, dest)
+        return resolve_name_collision(
+            track, dest, console or Console(color=False), get_input
+        )
     shutil.move(str(src), str(dest))
-    return dest
+    return dest, "promoted"
+
+
+def _ask_version(
+    console: Console,
+    get_input: Callable[[str], str],
+    what: str,
+) -> str | None:
+    """Prompt for a canonical version label. Returns None when cancelled."""
+    while True:
+        raw = (
+            get_input(f"Version for {what} (e.g. 'Radio Edit'; '.' to cancel): ") or ""
+        ).strip()
+        if raw in (".", "q"):
+            return None
+        if raw.lower() in ("none", "no version", "-", "n/a"):
+            console.warn("a version label is required to distinguish the files")
+            continue
+        version = canonicalize_version(raw)
+        if version:
+            return version
+        console.warn(
+            "a version label is needed (e.g. 'Clean', 'Radio Edit', 'The Blessed Madonna Remix')"
+        )
+
+
+def _file_summary(path: Path) -> dict[str, str]:
+    """Best-effort (artist, title, duration) for a path, for display only."""
+    out = {"artist": "", "title": "", "duration": "unknown"}
+    if HAVE_MUTAGEN:
+        tags, _info = read_tags(path)
+        if tags.get("artist"):
+            out["artist"] = tags["artist"]
+        if tags.get("title"):
+            out["title"] = tags["title"]
+        if tags.get("duration"):
+            out["duration"] = fmt_duration(tags["duration"])
+    fa, ft = guess_from_filename(path.stem)
+    if not out["artist"] and fa:
+        out["artist"] = f"{fa} (from filename)"
+    if not out["title"] and ft:
+        out["title"] = f"{ft} (from filename)"
+    out["artist"] = out["artist"] or "(unknown)"
+    out["title"] = out["title"] or "(unknown)"
+    return out
+
+
+def _show_collision(console: Console, track: Track, target: Path) -> None:
+    existing = _file_summary(target)
+    console.out()
+    console.out(console.bold(f"Target filename already exists: {target.name}"))
+    console.out()
+    console.out(console.bold("Existing (Tracks/):"))
+    console.out(f"  Artist:    {existing['artist']}")
+    console.out(f"  Title:     {existing['title']}")
+    console.out(f"  Duration:  {existing['duration']}")
+    console.out()
+    console.out(console.bold(f"Incoming ({track.rel}):"))
+    console.out(f"  Artist:    {display_artist(track)}")
+    console.out(f"  Title:     {display_title(track)}")
+    console.out(f"  Duration:  {fmt_duration(track.duration)}")
+    console.out(f"  Fingerprint: {'yes' if track.fingerprint else 'no'}")
+    console.out()
+    console.out("These are likely different versions of the same track — both can")
+    console.out("be kept, but they need distinct names (never auto-numbered).")
+    console.out("[v] Version the incoming file    [e] Version the existing file")
+    console.out("[b] Version both                 [s] Skip (leave in Incoming/)")
+
+
+def resolve_name_collision(
+    track: Track,
+    target: Path,
+    console: Console,
+    get_input: Callable[[str], str],
+) -> tuple[Path, str]:
+    """Interactively resolve a promotion collision; never appends numbers.
+
+    'v' versions the incoming file, 'e' versions the existing Tracks file,
+    'b' versions both, 's' leaves the incoming file in Incoming/.
+    Returns (destination, action).
+    """
+    tracks_dir = target.parent
+    ext = target.suffix
+    src = track.path.resolve()
+    base = _stem_base(target.stem)
+    while True:
+        _show_collision(console, track, target)
+        choice = (get_input("Choice: ") or "").strip().lower()
+        if choice in ("s", "q", "."):
+            return target, "skipped"
+        if choice == "v":
+            version = _ask_version(console, get_input, "the incoming file")
+            if version is None:
+                continue
+            dest = tracks_dir / f"{base} [{version}]{ext}"
+            if dest.exists():
+                console.warn(f"'{dest.name}' already exists — pick a different version")
+                continue
+            shutil.move(str(src), str(dest))
+            return dest, "renamed"
+        if choice in ("e", "b"):
+            v_existing = _ask_version(console, get_input, "the existing file")
+            if v_existing is None:
+                continue
+            new_existing = tracks_dir / f"{base} [{v_existing}]{ext}"
+            if new_existing.exists():
+                console.warn(f"'{new_existing.name}' already exists — pick a different version")
+                continue
+            if choice == "e":
+                shutil.move(str(target), str(new_existing))
+                shutil.move(str(src), str(target))
+                return target, "renamed-existing"
+            v_incoming = _ask_version(console, get_input, "the incoming file")
+            if v_incoming is None:
+                continue
+            if v_incoming == v_existing:
+                console.warn("both files need distinct version labels to coexist")
+                continue
+            dest = tracks_dir / f"{base} [{v_incoming}]{ext}"
+            if dest.exists():
+                console.warn(f"'{dest.name}' already exists — pick a different version")
+                continue
+            shutil.move(str(target), str(new_existing))
+            shutil.move(str(src), str(dest))
+            return dest, "renamed-both"
+        console.out("choices: [v] version the incoming file  [e] version the existing file  "
+                    "[b] version both  [s] skip (leave in Incoming/)")
+
+
+def prune_empty_dirs(root: Path, source: str) -> int:
+    """Remove now-empty subdirectories under <SourceDir>, bottom-up."""
+    base = root / SOURCE_DIRS[source]
+    if not base.is_dir():
+        return 0
+    removed = 0
+    for dirpath, _dirnames, _filenames in os.walk(base, topdown=False):
+        p = Path(dirpath)
+        if p == base:
+            continue
+        try:
+            p.rmdir()  # only succeeds when empty
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 # --------------------------------------------------------------------------
@@ -1071,7 +1458,7 @@ def play_audio(path: Path, console: Console, label: str) -> None:
         return
     console.info(f"Playing {label}: {path.name}")
     try:
-        subprocess.run(["ffplay", "-autoexit", "-loglevel", "error", str(path)])
+        subprocess.run(["ffplay", "-autoexit", "-loglevel", "error", str(path)], check=False)
     except KeyboardInterrupt:
         pass
 
@@ -1089,13 +1476,29 @@ def action_keep_preferred(root: Path, pair: Pair, mode: str) -> str:
     return "quarantined"
 
 
-def action_keep_both(root: Path, pair: Pair, mode: str) -> str:
-    """[b] Keep both. In ingest mode the Incoming copy is promoted to Tracks."""
+def action_keep_both(
+    root: Path,
+    pair: Pair,
+    mode: str,
+    *,
+    get_input: Callable[[str], str] | None = None,
+    console: Console | None = None,
+) -> str:
+    """[b] Keep both. In ingest mode the Incoming copy is promoted to Tracks.
+
+    Promotion flattens and renames the file ('Title - Artist [Version].ext');
+    a name collision triggers the interactive resolution (version / skip).
+    """
     if mode == "ingest":
         targets = [t for t in (pair.a, pair.b) if t.source == "incoming" and t.path.exists()]
+        moved = False
         for t in targets:
-            promote_to_tracks(root, t)
-        return "promoted" if targets else "kept"
+            _, action = promote_to_tracks(
+                root, t, get_input=get_input, console=console
+            )
+            if action != "skipped":
+                moved = True
+        return "promoted" if moved else "kept"
     return "kept"
 
 
@@ -1107,7 +1510,7 @@ class ReviewStats:
     kept: int = 0
     skipped: int = 0
     played: int = 0
-    remaining: list["Pair"] = field(default_factory=list)
+    remaining: list[Pair] = field(default_factory=list)
 
 
 SEVERITY_STYLE = {
@@ -1118,7 +1521,7 @@ SEVERITY_STYLE = {
 }
 
 
-def fmt_duration(sec: Optional[float]) -> str:
+def fmt_duration(sec: float | None) -> str:
     if sec is None:
         return "unknown"
     total_tenths = max(0, round(sec * 10))
@@ -1181,7 +1584,7 @@ def render_pair(pair: Pair, index: int, total: int, round_no: int, console: Cons
     console.out(f"[l] {keep}    [b] Keep both    [p] Play A    [o] Play B")
     console.out("[c] Compare audio (A then B)    [i] More info    [s] Skip for now    [q] Quit safely")
     if mode == "ingest":
-        console.out(console.dim("[b] in ingest mode moves the Incoming copy to Tracks/."))
+        console.out(console.dim("[b] in ingest mode promotes the Incoming copy to Tracks/ (flat, renamed)."))
 
 
 def print_info(pair: Pair, console: Console) -> None:
@@ -1189,7 +1592,7 @@ def print_info(pair: Pair, console: Console) -> None:
         console.out(console.bold(f"--- {label} ---"))
         console.out(f"Path:       {t.path}")
         console.out(f"Size:       {fmt_bytes(t.size)}")
-        console.out(f"Modified:   {datetime.fromtimestamp(t.mtime_ns / 1e9).isoformat(timespec='seconds')}")
+        console.out(f"Modified:   {datetime.fromtimestamp(t.mtime_ns / 1e9).isoformat(timespec='seconds')}")  # noqa: DTZ006 - local time display
         console.out(f"SHA-256:    {t.sha256 or '(not computed)'}")
         console.out(f"Tags:       title={t.title or '—'} artist={t.artist or '—'} "
                     f"album={t.album or '—'} track={t.track_no or '—'}")
@@ -1211,7 +1614,7 @@ def review_pairs(
     console: Console,
     *,
     mode: str,
-    get_input: Optional[Callable[[str], str]] = None,
+    get_input: Callable[[str], str] | None = None,
 ) -> ReviewStats:
     """Present one pair at a time; a pair gets at most two chances.
 
@@ -1224,7 +1627,7 @@ def review_pairs(
     pending: list[Pair] = list(pairs)
     round_no = 1
     quit_now = False
-    quit_remaining: Optional[list[Pair]] = None
+    quit_remaining: list[Pair] | None = None
     while pending and not quit_now:
         round_pairs, pending = pending, []
         idx = 0
@@ -1252,7 +1655,7 @@ def review_pairs(
                     stats.kept += 1
                 stats.processed += 1
             elif choice == "b":
-                res = action_keep_both(root, pair, mode)
+                res = action_keep_both(root, pair, mode, get_input=read, console=console)
                 if res == "promoted":
                     stats.promoted += 1
                 else:
@@ -1312,11 +1715,11 @@ def config_path() -> Path:
 class SyncConfig:
     remote: str
     remote_dj: str
-    local_mixxx: Optional[str] = None
-    remote_mixxx: Optional[str] = None
+    local_mixxx: str | None = None
+    remote_mixxx: str | None = None
 
 
-def load_sync_config(root: Path) -> tuple[Optional[SyncConfig], str]:
+def load_sync_config(root: Path) -> tuple[SyncConfig | None, str]:
     cfg = load_config()
     section = cfg.get("sync") or {}
     missing = [k for k in ("remote", "remote_dj") if not section.get(k)]
@@ -1351,8 +1754,9 @@ def build_rsync_cmd(src: str, dst: str, dry_run: bool, delete: bool) -> list[str
 def plan_sync(root: Path, cfg: SyncConfig, direction: str) -> list[tuple[str, str, str]]:
     """Return [(label, src, dst), ...] for push or pull.
 
-    push:  Desktop is authoritative  (local -> remote)
-    pull:  Laptop is authoritative    (remote -> local)
+    push:  local machine is authoritative   (local -> remote)
+    pull:  remote machine is authoritative  (remote -> local)
+    The remote is whatever host you configure in [sync] (IP or DNS name).
     """
     plans: list[tuple[str, str, str]] = []
     if direction == "push":
@@ -1379,7 +1783,7 @@ def rsync_dry_list(cmd: list[str]) -> tuple[int, list[str]]:
     # cmd ends with [src, dst]; keep options before the path arguments
     probe_cmd = cmd[:-2] + ["--out-format=%n"] + cmd[-2:]
     try:
-        p = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=300)
+        p = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=300, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return 0, []
     names = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
@@ -1392,13 +1796,13 @@ def requires_confirmation(dry_run: bool, yes: bool) -> bool:
 
 def mixxx_running_local() -> bool:
     try:
-        p = subprocess.run(["pgrep", "-x", "mixxx"], capture_output=True)
+        p = subprocess.run(["pgrep", "-x", "mixxx"], capture_output=True, check=False)
         return p.returncode == 0
     except OSError:
         return False
 
 
-def mixxx_running_remote(cfg: SyncConfig) -> Optional[bool]:
+def mixxx_running_remote(cfg: SyncConfig) -> bool | None:
     """Best-effort remote check. None when the remote state cannot be determined."""
     if shutil.which("ssh") is None:
         return None
@@ -1406,7 +1810,7 @@ def mixxx_running_remote(cfg: SyncConfig) -> Optional[bool]:
         p = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", cfg.remote,
              "pgrep -x mixxx >/dev/null 2>&1 && echo RUNNING || echo NOT"],
-            capture_output=True, text=True, timeout=25,
+            capture_output=True, text=True, timeout=25, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -1418,7 +1822,7 @@ def mixxx_running_remote(cfg: SyncConfig) -> Optional[bool]:
     return None
 
 
-def mixxx_guard(cfg: SyncConfig, console: Console) -> Optional[str]:
+def mixxx_guard(cfg: SyncConfig, console: Console) -> str | None:
     """Error string if Mixxx must not be synced; warns about unknown remote state."""
     if mixxx_running_local():
         return "Mixxx appears to be running locally — close it before syncing Mixxx settings"
@@ -1440,7 +1844,7 @@ def cmd_sync(args: argparse.Namespace, console: Console, root: Path) -> int:
         console.out("Comparing both directions (dry-run — nothing is changed)…")
         console.out()
         for direction in ("push", "pull"):
-            arrow = "Desktop → Laptop" if direction == "push" else "Laptop → Desktop"
+            arrow = "local → remote" if direction == "push" else "remote → local"
             console.out(console.bold(direction.upper()) + "  " + arrow)
             for label, src, dst in plan_sync(root, cfg, direction):
                 n, sample = rsync_dry_list(build_rsync_cmd(src, dst, dry_run=True, delete=False))
@@ -1454,7 +1858,7 @@ def cmd_sync(args: argparse.Namespace, console: Console, root: Path) -> int:
 
     direction = args.sync_action  # push | pull
     plans = plan_sync(root, cfg, direction)
-    arrow = "Desktop → Laptop" if direction == "push" else "Laptop → Desktop"
+    arrow = "local → remote" if direction == "push" else "remote → local"
     console.out(console.bold(f">>> {direction.upper()}: {arrow} <<<"))
     for label, src, dst in plans:
         console.out(f"  {label}: {src}  →  {dst}")
@@ -1475,7 +1879,7 @@ def cmd_sync(args: argparse.Namespace, console: Console, root: Path) -> int:
         cmd = build_rsync_cmd(src, dst, dry_run=args.dry_run, delete=args.delete)
         if args.dry_run:
             console.out(console.dim(f"dry-run: {' '.join(cmd)}"))
-        r = subprocess.run(cmd)
+        r = subprocess.run(cmd, check=False)
         if r.returncode != 0:
             console.error(f"rsync failed for {label} (exit {r.returncode})")
             return 1
@@ -1490,7 +1894,7 @@ def cmd_sync(args: argparse.Namespace, console: Console, root: Path) -> int:
 
 def _tool_version(exe: str, args: list[str]) -> str:
     try:
-        p = subprocess.run([exe, *args], capture_output=True, text=True, timeout=10)
+        p = subprocess.run([exe, *args], capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.TimeoutExpired):
         return "(version unknown)"
     text = (p.stdout + p.stderr).splitlines()
@@ -1625,7 +2029,7 @@ def cmd_dedupe(args: argparse.Namespace, console: Console, root: Path) -> int:
 
 def cmd_ingest(args: argparse.Namespace, console: Console, root: Path) -> int:
     ensure_dirs(root, console)
-    tracks, stats = scan_collection(root, use_cache=not args.no_cache)
+    tracks, _ = scan_collection(root, use_cache=not args.no_cache)
     incoming = [t for t in tracks if t.source == "incoming"]
     if not incoming:
         console.info("nothing in Incoming/")
@@ -1655,11 +2059,27 @@ def cmd_ingest(args: argparse.Namespace, console: Console, root: Path) -> int:
             answer = input(f"Promote all {len(remaining)} file(s) to Tracks/? [y/N] ").strip().lower()
             promote = answer in ("y", "yes")
         if promote:
+            moved = skipped = 0
             for t in remaining:
-                dest = promote_to_tracks(root, t)
+                try:
+                    dest, action = promote_to_tracks(root, t, get_input=input, console=console)
+                except NameCollision as e:
+                    console.warn(f"collision not resolved — left in Incoming/: {t.rel} ({e.target.name})")
+                    skipped += 1
+                    continue
+                if action == "skipped":
+                    console.warn(f"skipped (collision) — left in Incoming/: {t.rel}")
+                    skipped += 1
+                    continue
+                moved += 1
                 console.out(f"  moved: {t.rel}  ->  {dest.relative_to(root).as_posix()}")
+            if skipped:
+                console.info(f"{skipped} file(s) left in Incoming/ (collision skipped)")
         else:
             console.info("leaving files in Incoming/")
+    pruned = prune_empty_dirs(root, "incoming")
+    if pruned:
+        console.info(f"removed {pruned} now-empty folder(s) under Incoming/")
     save_cache_from_tracks(root, tracks)
     return 0
 
@@ -1717,13 +2137,29 @@ def detect_root(script_dir: Path) -> Path:
     return script_dir
 
 
-def resolve_root(override: Optional[str]) -> Path:
+def resolve_root(override: str | None) -> Path:
+    """Resolve the DJ root: --root, $DJTOOL_ROOT, [collection] root, then autodetect.
+
+    With the project living outside the collection (e.g. ~/programs/djtool) the
+    config setting is the normal path; auto-detection only helps when the
+    project is inside the DJ folder.
+    """
     if override:
         return Path(override).expanduser().resolve()
     env = os.environ.get("DJTOOL_ROOT")
     if env:
         return Path(env).expanduser().resolve()
-    return detect_root(Path(__file__).resolve().parent)
+    cfg = load_config()
+    configured = (cfg.get("collection") or {}).get("root")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    detected = detect_root(Path(__file__).resolve().parent)
+    if not any((detected / SOURCE_DIRS[s]).is_dir() for s in SOURCES):
+        raise ConfigError(
+            "could not locate the DJ collection — add a [collection] root to "
+            f"{CONFIG_FILE_NAME} (or pass --root / set DJTOOL_ROOT)"
+        )
+    return detected
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1767,12 +2203,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("sync", "Synchronize with a remote DJ root via rsync over SSH", cmd_sync)
     syn = sp.add_subparsers(dest="sync_action", metavar="ACTION", required=True)
     syn.add_parser("status", help="dry-run comparison of push and pull").set_defaults(func=cmd_sync)
-    push = syn.add_parser("push", help="Desktop is authoritative: local -> remote")
+    push = syn.add_parser("push", help="local machine is authoritative: local -> remote")
     push.add_argument("-n", "--dry-run", action="store_true", help="show what would change")
     push.add_argument("--delete", action="store_true", help="delete remote files that no longer exist locally")
     push.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     push.set_defaults(func=cmd_sync)
-    pull = syn.add_parser("pull", help="Laptop is authoritative: remote -> local")
+    pull = syn.add_parser("pull", help="remote machine is authoritative: remote -> local")
     pull.add_argument("-n", "--dry-run", action="store_true", help="show what would change")
     pull.add_argument("--delete", action="store_true", help="delete local files that no longer exist remotely")
     pull.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
@@ -1780,7 +2216,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     console = Console(color=False if getattr(args, "no_color", False) else None)

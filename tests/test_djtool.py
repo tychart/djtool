@@ -11,7 +11,6 @@ import os
 import shutil
 import subprocess
 import wave
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -237,22 +236,20 @@ class TestPathSafety:
             dt.quarantine_file(root, track)
         assert f.exists()
 
-    def test_quarantine_preserves_relative_path(self, root):
+    def test_quarantine_flattens_relative_path(self, root):
         f = root / "Incoming" / "sub" / "x.flac"
         f.parent.mkdir(parents=True)
         f.write_bytes(b"data")
         track = make_track(root, "incoming", "sub/x.flac", path=f, size=4)
         dest = dt.quarantine_file(root, track)
         assert not f.exists()
-        day = datetime.now().strftime("%Y-%m-%d")
-        assert dest == root / ".Trash" / day / "incoming" / "sub" / "x.flac"
+        assert dest == dt.trash_dir_for(root) / "incoming" / "x.flac"
         assert dest.read_bytes() == b"data"
 
     def test_quarantine_unique_name_on_collision(self, root):
         f = root / "Incoming" / "x.flac"
         f.write_bytes(b"data")
-        day = datetime.now().strftime("%Y-%m-%d")
-        clash = root / ".Trash" / day / "incoming" / "x.flac"
+        clash = dt.trash_dir_for(root) / "incoming" / "x.flac"
         clash.parent.mkdir(parents=True)
         clash.write_bytes(b"other")
         track = make_track(root, "incoming", "x.flac", path=f, size=4)
@@ -279,27 +276,162 @@ class TestTrash:
 
 
 class TestPromote:
-    def test_promote_to_tracks(self, root):
+    def test_promote_to_tracks_flat(self, root):
         f = root / "Incoming" / "new song.flac"
         f.write_bytes(b"data")
         track = make_track(root, "incoming", "new song.flac", path=f, size=4)
-        dest = dt.promote_to_tracks(root, track)
+        dest, action = dt.promote_to_tracks(root, track)
+        assert action == "promoted"
         assert dest == root / "Tracks" / "new song.flac"
         assert not f.exists()
         assert dest.read_bytes() == b"data"
 
-    def test_promote_unique_name(self, root):
+    def test_promote_flattens_nested_folders(self, root):
+        f = root / "Incoming" / "Messy Album 2024" / "Some Rip" / "Track.flac"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"data")
+        track = make_track(root, "incoming", "Messy Album 2024/Some Rip/Track.flac", path=f, size=4)
+        dest, _ = dt.promote_to_tracks(root, track)
+        assert dest == root / "Tracks" / "Track.flac"
+        assert not f.exists()
+
+    def test_promote_renames_title_artist(self, root):
+        f = root / "Incoming" / "whatever.flac"
+        f.write_bytes(b"data")
+        track = make_track(root, "incoming", "whatever.flac", path=f, size=4,
+                           title="Yeah!", artist="Usher")
+        dest, action = dt.promote_to_tracks(root, track)
+        assert action == "promoted"
+        assert dest == root / "Tracks" / "Yeah! - Usher.flac"
+
+    def test_promote_adds_canonical_version(self, root):
+        f = root / "Incoming" / "levitating.flac"
+        f.write_bytes(b"data")
+        track = make_track(root, "incoming", "levitating.flac", path=f, size=4,
+                           title="Levitating (Clean Radio Edit)", artist="Dua Lipa")
+        dest, _ = dt.promote_to_tracks(root, track)
+        assert dest == root / "Tracks" / "Levitating - Dua Lipa [Clean Radio Edit].flac"
+
+    def test_promote_collision_raises_without_input(self, root):
         f = root / "Incoming" / "x.flac"
         f.write_bytes(b"data")
         (root / "Tracks" / "x.flac").write_bytes(b"existing")
         track = make_track(root, "incoming", "x.flac", path=f, size=4)
-        dest = dt.promote_to_tracks(root, track)
-        assert dest.name == "x - 2.flac"
+        with pytest.raises(dt.NameCollision):
+            dt.promote_to_tracks(root, track)
+        assert f.exists()  # nothing was moved
+
+    def test_promote_collision_resolved_with_version(self, root, monkeypatch):
+        f = root / "Incoming" / "x.flac"
+        f.write_bytes(b"data")
+        (root / "Tracks" / "x.flac").write_bytes(b"existing")
+        track = make_track(root, "incoming", "x.flac", path=f, size=4)
+        answers = iter(["v", "radio edit"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        dest, action = dt.promote_to_tracks(root, track, get_input=input)
+        assert action == "renamed"
+        assert dest == root / "Tracks" / "x [Radio Edit].flac"
+        assert dest.read_bytes() == b"data"
+        assert (root / "Tracks" / "x.flac").read_bytes() == b"existing"
+
+    def test_promote_collision_rename_existing(self, root, monkeypatch):
+        f = root / "Incoming" / "x.flac"
+        f.write_bytes(b"data")
+        (root / "Tracks" / "x.flac").write_bytes(b"existing")
+        track = make_track(root, "incoming", "x.flac", path=f, size=4)
+        answers = iter(["e", "clean"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        dest, action = dt.promote_to_tracks(root, track, get_input=input)
+        assert action == "renamed-existing"
+        assert dest == root / "Tracks" / "x.flac"
+        assert dest.read_bytes() == b"data"
+        assert (root / "Tracks" / "x [Clean].flac").read_bytes() == b"existing"
+
+    def test_promote_collision_rename_both(self, root, monkeypatch):
+        f = root / "Incoming" / "x.flac"
+        f.write_bytes(b"data")
+        (root / "Tracks" / "x.flac").write_bytes(b"existing")
+        track = make_track(root, "incoming", "x.flac", path=f, size=4)
+        answers = iter(["b", "clean", "radio edit"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        dest, action = dt.promote_to_tracks(root, track, get_input=input)
+        assert action == "renamed-both"
+        assert dest == root / "Tracks" / "x [Radio Edit].flac"
+        assert (root / "Tracks" / "x [Clean].flac").read_bytes() == b"existing"
+
+    def test_promote_collision_skip(self, root, monkeypatch):
+        f = root / "Incoming" / "x.flac"
+        f.write_bytes(b"data")
+        (root / "Tracks" / "x.flac").write_bytes(b"existing")
+        track = make_track(root, "incoming", "x.flac", path=f, size=4)
+        answers = iter(["s"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        _, action = dt.promote_to_tracks(root, track, get_input=input)
+        assert action == "skipped"
+        assert f.exists()
+        assert (root / "Tracks" / "x.flac").read_bytes() == b"existing"
 
     def test_promote_refuses_library(self, root):
         track = make_track(root, "library", "x.flac")
         with pytest.raises(ValueError, match="Incoming"):
             dt.promote_to_tracks(root, track)
+
+
+class TestNaming:
+    def test_extract_version_groups(self):
+        assert dt.extract_version("Song (Clean Radio Edit)") == ("Song", "Clean Radio Edit")
+        assert dt.extract_version("Levitating [The Blessed Madonna Remix]") == (
+            "Levitating", "The Blessed Madonna Remix")
+        assert dt.extract_version("Song") == ("Song", "")
+        assert dt.extract_version("I Don't Have To Be Me ('Til Monday)") == (
+            "I Don't Have To Be Me ('Til Monday)", "")
+
+    def test_extract_version_trailing_phrase(self):
+        assert dt.extract_version("Song - Radio Edit") == ("Song", "Radio Edit")
+        assert dt.extract_version("Why Don't We Just Dance") == ("Why Don't We Just Dance", "")
+
+    def test_canonicalize_version(self):
+        assert dt.canonicalize_version("RADIO EDIT") == "Radio Edit"
+        assert dt.canonicalize_version("clean version") == "Clean"
+        assert dt.canonicalize_version("The Blessed Madonna Remix") == "The Blessed Madonna Remix"
+        assert dt.canonicalize_version("original version") == ""  # drop-marked
+
+    def test_derive_track_name_fallback(self, root):
+        t = make_track(root, "incoming", "nested/deep song.flac")
+        assert dt.derive_track_name(t) == "deep song.flac"
+
+    def test_derive_track_name_from_filename(self, root):
+        t = make_track(root, "incoming", "Josh Turner - Why Don't We Just Dance.flac")
+        assert dt.derive_track_name(t) == "Why Don't We Just Dance - Josh Turner.flac"
+
+    def test_derive_track_name_remix(self, root):
+        t = make_track(root, "incoming", "x.flac", title="Cheerleader (Felix Jaehn Remix Radio Edit)", artist="OMI")
+        assert dt.derive_track_name(t) == "Cheerleader - OMI [Felix Jaehn Remix Radio Edit].flac"
+
+    def test_sanitize_filename_part(self):
+        assert dt.sanitize_filename_part('a/b:c*?"<>|\\') == "abc"
+
+    def test_simplify_artist_dedupes(self):
+        assert dt.simplify_artist("A, A, B") == "A, B"
+        assert dt.simplify_artist("Mark Ronson feat. Bruno Mars") == "Mark Ronson feat. Bruno Mars"
+
+
+class TestPrune:
+    def test_prune_empty_dirs_bottom_up(self, root):
+        (root / "Incoming" / "a" / "b").mkdir(parents=True)
+        assert dt.prune_empty_dirs(root, "incoming") == 2
+        assert not (root / "Incoming" / "a").exists()
+        assert (root / "Incoming").exists()
+
+    def test_prune_keeps_dirs_with_files(self, root):
+        f = root / "Incoming" / "a" / "x.flac"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"data")
+        assert dt.prune_empty_dirs(root, "incoming") == 0
+        assert f.exists()
+
+    def test_prune_missing_source_ok(self, root):
+        assert dt.prune_empty_dirs(root, "tracks") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +600,7 @@ class TestSync:
         dst.mkdir()
         (src / "a.flac").write_bytes(b"audio")
         cmd = dt.build_rsync_cmd(str(src) + "/", str(dst) + "/", dry_run=True, delete=False)
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
         assert r.returncode == 0
         assert list(dst.iterdir()) == []
 
@@ -481,7 +613,7 @@ class TestSync:
         (dst / "a.flac").write_bytes(b"audio")
         (dst / "stale.flac").write_bytes(b"old")
         cmd = dt.build_rsync_cmd(str(src) + "/", str(dst) + "/", dry_run=False, delete=True)
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, check=False)
         assert r.returncode == 0
         assert (dst / "a.flac").exists()
         assert not (dst / "stale.flac").exists()
@@ -539,13 +671,19 @@ class TestReview:
         assert lib.exists()
         assert not inc.exists()
 
-    def test_keep_both_promotes_in_ingest_mode(self, root, monkeypatch):
-        pair, lib, inc = self._dup_pair(root)
+    def test_keep_both_promotes_flat_in_ingest_mode(self, root, monkeypatch):
+        lib = make_wav(root / "Library" / "Song.flac", seed=5)
+        inc = root / "Incoming" / "Rip Folder" / "Song.flac"
+        inc.parent.mkdir(parents=True)
+        shutil.copyfile(lib, inc)
+        tracks, _ = dt.scan_collection(root)
+        pairs = dt.find_candidates(tracks)
+        assert len(pairs) == 1
         answers = iter(["b", "q"])
         monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
-        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="ingest")
+        stats = dt.review_pairs(root, pairs, dt.Console(color=False), mode="ingest")
         assert stats.promoted == 1
-        assert (root / "Tracks" / "Song.flac").exists()
+        assert (root / "Tracks" / "Song.flac").exists()  # flat, no 'Rip Folder'
         assert not inc.exists()
 
     def test_quit_leaves_everything(self, root, monkeypatch):
@@ -558,7 +696,7 @@ class TestReview:
         assert len(stats.remaining) == 1
 
     def test_skip_gets_second_chance(self, root, monkeypatch):
-        pair, lib, inc = self._dup_pair(root)
+        pair, _lib, inc = self._dup_pair(root)
         answers = iter(["s", "l", "q"])
         monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
         stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
@@ -588,6 +726,31 @@ class TestHelpers:
         pkg = tmp_path / "nowhere" / "src" / "djtool"
         pkg.mkdir(parents=True)
         assert dt.detect_root(pkg) == pkg
+
+
+class TestResolveRoot:
+    def test_config_root(self, tmp_path):
+        dj = tmp_path / "dj"
+        dj.mkdir()
+        dt.config_path().write_text(f'[collection]\nroot = "{dj}"\n')
+        assert dt.resolve_root(None) == dj.resolve()
+
+    def test_override_wins(self, tmp_path):
+        dj = tmp_path / "dj"
+        dj.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        dt.config_path().write_text(f'[collection]\nroot = "{elsewhere}"\n')
+        assert dt.resolve_root(str(dj)) == dj.resolve()
+
+    def test_unconfigured_raises_clear_error(self, tmp_path, monkeypatch):
+        # Project outside any collection and no [collection] root -> clear error.
+        # Point __file__ somewhere with no Library/Tracks/Incoming ancestors.
+        monkeypatch.setattr(
+            dt, "__file__",
+            str(tmp_path / "nowhere" / "src" / "djtool" / "__init__.py"),
+        )
+        with pytest.raises(dt.ConfigError, match="collection"):
+            dt.resolve_root(None)
 
 
 class TestConfig:

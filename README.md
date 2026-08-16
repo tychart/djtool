@@ -2,34 +2,50 @@
 
 Small, maintainable CLI for managing a DJ music collection. Data safety is the
 first priority: `Library/` is strictly read-only, and interactive removal only
-quarantines files into `.Trash/YYYY-MM-DD/`.
+quarantines files into `.Trash/YYYY-MM-DD/` (a hidden folder Mixxx never scans).
+
+## Collection layout
 
 ```
-DJ/
-├── Library/                 # read-only Beets mirror — never modified
-├── Tracks/                  # canonical DJ tracks (edits, remixes, clean versions…)
-├── Incoming/                # staging area, reviewed before promotion
-└── djtool/                  # the whole tool — self-contained (uv project + git repo)
-    ├── djtool.toml          # your config ([sync], …)
-    ├── .djtool-cache.json   # disposable derived-data cache
-    └── …                    # package, tests, .venv (git-ignored)
+DJ/                                  # location configured in djtool.toml
+├── Library/             read-only Beets mirror — NEVER modified by djtool
+├── Tracks/              canonical DJ tracks — flat, 'Title - Artist [Version].ext'
+├── Incoming/            staging area, reviewed before promotion
+└── .Trash/YYYY-MM-DD/   quarantine (flat), skipped by Mixxx library scans
 ```
 
-The tool is fully self-contained: the config and the derived-data cache live
-inside the `djtool/` project folder, so everything travels with your DJ folder
-as one unit.
+djtool itself is a normal project — clone it anywhere (e.g. `~/programs/djtool`),
+point `[collection] root` at your DJ folder, and run it from anywhere.
 
-## Setup
+## Install
 
 ```sh
-cd djtool
-uv sync                      # creates .venv, installs mutagen + rapidfuzz (+ pytest)
-uv run djtool doctor         # environment & dependency check
+git clone <your-repo-url> ~/programs/djtool
+cd ~/programs/djtool
+uv sync                       # creates .venv, installs mutagen + rapidfuzz (+ pytest)
+uv run djtool doctor          # environment & dependency check
 ```
 
 `fpcalc` (chromaprint) is optional but strongly recommended:
 `sudo dnf install chromaprint-tools`. Without it, duplicate detection degrades
 to metadata-only and never claims "very likely same recording".
+
+## Configure — djtool.toml
+
+```toml
+[collection]
+root = "/home/you/Music/DJ"      # the folder containing Library/, Tracks/, Incoming/
+
+[sync]
+remote = "user@host-or-ip"       # any SSH target (IP or DNS name)
+remote_dj = "/home/user/Music/DJ"
+# local_mixxx = "/home/user/.mixxx"   # optional, synced as one coherent state
+# remote_mixxx = "/home/user/.mixxx"
+```
+
+The DJ root is resolved in this order: `--root` flag, `$DJTOOL_ROOT`,
+`[collection] root`, then auto-detection (walking up from the package — only
+useful when the project still lives inside the DJ folder).
 
 ## Usage
 
@@ -41,13 +57,41 @@ uv run djtool trash list               # inspect quarantine
 uv run djtool trash empty --yes        # permanently empty quarantine
 uv run djtool cache status | clear     # derived-data cache
 uv run djtool sync status              # dry-run comparison both directions
-uv run djtool sync push -n             # dry-run push (Desktop → Laptop)
+uv run djtool sync push -n             # dry-run push (local → remote)
 uv run djtool sync push                # push with confirmation
-uv run djtool sync pull                # pull (Laptop → Desktop)
+uv run djtool sync pull                # pull (remote → local)
 ```
 
 All commands work without a terminal too; ANSI colors are disabled when stdout
 is not a TTY (or with `--no-color`).
+
+## Tracks/ is flat — 'Title - Artist [Version].ext'
+
+Ingest only moves **files**, never folder structure. Every promoted file is
+renamed from its embedded tags (falling back to best-effort filename parsing):
+
+```
+Dancing Queen - ABBA.flac
+Levitating - Dua Lipa [Clean Radio Edit].flac
+Cheerleader - OMI [Felix Jaehn Remix Radio Edit].flac
+Rather Be - Clean Bandit [The Magician Remix].flac
+```
+
+* `[Version]` is omitted when there is nothing to distinguish.
+* Version labels are normalized to a small vocabulary — `radio edit`,
+  `RADIO EDIT` and `single version` become `Radio Edit` / `Single Version`;
+  `clean version` becomes `Clean`. Named remixes stay descriptive.
+* Combined qualifiers live inside one bracket: `[Clean Radio Edit]`,
+  `[DJ Intro Clean]`.
+* No album, year, track number, BPM, key or crate goes into the filename.
+* Album, year, track numbers and crate/playlist source are never used.
+
+**Collisions are never auto-renamed.** If a promoted file would collide with an
+existing Tracks file, djtool stops and asks: version the incoming file, version
+the existing one, version both, or skip. Files are never numbered
+(`Song (2).flac`), which keeps `Tracks/` self-explanatory years later.
+
+After promotion, now-empty Incoming subfolders are removed automatically.
 
 ## How duplicate detection works
 
@@ -66,29 +110,36 @@ always shown to you; nothing is ever auto-deleted.
 
 In the review UI, `[l]` keeps the preferred file (Library wins by default) and
 quarantines the other to `.Trash/YYYY-MM-DD/`; `[b]` keeps both (in `ingest`,
-it also promotes the Incoming copy to `Tracks/`); `[p]`/`[o]` play files via
-`ffplay`; `[c]` plays A then B; `[s]` defers; `[q]` quits safely.
+it also promotes the Incoming copy to `Tracks/` — flat, renamed); `[p]`/`[o]`
+play files via `ffplay`; `[c]` plays A then B; `[s]` defers; `[q]` quits safely.
+
+## Mixxx
+
+Add your DJ root (or just `Tracks/`) as a library directory in Mixxx. Mixxx's
+library scanner skips dot-prefixed (hidden) folders, so `.Trash/` never shows
+up in a library scan — no extra setup needed. If you don't want `Library/`
+(Beets mirror) tracks in Mixxx, add only `Tracks/` (and `Incoming/`) as roots.
 
 ## Cache
 
-`.djtool-cache.json` lives inside the `djtool/` project folder and stores
+`.djtool-cache.json` lives in the `djtool/` project folder and stores
 **derived data only** (hashes, durations, parsed tags, fingerprints), invalidated
-by file size + mtime. It is tagged with the DJ root it was built for, so a copy
-of the project pointed at a different collection simply rebuilds it. Deleting it
-(`djtool cache clear`) can never lose collection state or review decisions.
+by file size + mtime. It is tagged with the DJ root it was built for. Deleting
+it (`djtool cache clear`) can never lose collection state or review decisions.
 
 ## Sync
 
-Configured in `djtool/djtool.toml` (`[sync]`). `push` treats the Desktop as
-authoritative, `pull` the Laptop; the exact direction is always shown before
-anything happens. `--delete` is opt-in and still requires confirmation.
-Mixxx settings are synced as one coherent state: the command refuses to run
-when Mixxx appears to be running locally, and warns when the remote state
-cannot be verified. SQLite databases are never merged — they are copied whole.
+Configured in `djtool.toml` (`[sync]`). `push` treats the local machine as
+authoritative (`local → remote`), `pull` the remote (`remote → local`); the
+exact direction is always shown before anything happens. The remote is whatever
+host you configure — an IP or DNS name. `--delete` is opt-in and still requires
+confirmation. Mixxx settings are synced as one coherent state: the command
+refuses to run when Mixxx appears to be running locally, and warns when the
+remote state cannot be verified. SQLite databases are never merged — they are
+copied whole.
 
 The DJ sync excludes collection quarantine (`.Trash`) and project internals
-(`.venv`, `.git`, `__pycache__`, the cache) — the remote receives code and
-config, not machinery.
+(`.venv`, `.git`, `__pycache__`, the cache).
 
 ## Development
 

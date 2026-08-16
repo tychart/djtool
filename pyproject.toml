@@ -13,7 +13,10 @@ dependencies = [
 djtool = "djtool.core:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.16.3",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -24,3 +27,25 @@ packages = ["src/djtool"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+# Deliberately pinned: the codebase is written against ruff's default rule set
+# plus modern-typing/robustness checks. Full categories (e.g. RUF001 ambiguous
+# dashes in user-facing strings, S603 subprocess) would flag intentional style.
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9", "F",
+    "I",
+    "UP035", "UP037", "UP045",
+    "PLW1510",
+    "BLE001",
+    "S112",
+    "DTZ005", "DTZ006",
+    "RUF059",
+    "SIM103",
+    "PLR1730",
+    "FURB188",
+]
