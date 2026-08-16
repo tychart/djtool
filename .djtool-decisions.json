@@ -1,13 +1,6 @@
 {
  "decisions": [
   {
-   "a": "Library/The Tabernacle Choir at Temple Square/100 Years - Celebrating a Century of Recording Excellence/02 - How Great Thou Art.flac",
-   "action": "keep_both",
-   "b": "Library/The Tabernacle Choir at Temple Square/Then Sings My Soul/01 - How Great Thou Art.flac",
-   "created": "2026-08-16T14:18:57-06:00",
-   "id": "c10e80e3b1"
-  },
-  {
    "action": "remove",
    "created": "2026-08-16T14:19:48-06:00",
    "id": "6cb502b37d",
@@ -34,6 +27,81 @@
    "id": "1812a33d31",
    "kept": "Library/The Tabernacle Choir at Temple Square/Consider the Lilies/08 - The Lord Bless You and Keep You.flac",
    "removed": "Library/The Tabernacle Choir at Temple Square/Then Sings My Soul/18 - The Lord Bless You And Keep You.flac"
+  },
+  {
+   "action": "remove",
+   "created": "2026-08-16T14:26:46-06:00",
+   "id": "6329226467",
+   "kept": "Library/Compilations/Top Gun_ Original Motion Picture Soundtrack/01 - Danger Zone.flac",
+   "removed": "Library/Kenny Loggins/Yesterday, Today, Tomorrow_ The Greatest Hits of Kenny Loggins/05 - Danger Zone.flac"
+  },
+  {
+   "action": "remove",
+   "created": "2026-08-16T14:26:59-06:00",
+   "id": "c10e80e3b1",
+   "kept": "Library/The Tabernacle Choir at Temple Square/Then Sings My Soul/01 - How Great Thou Art.flac",
+   "removed": "Library/The Tabernacle Choir at Temple Square/100 Years - Celebrating a Century of Recording Excellence/02 - How Great Thou Art.flac"
+  },
+  {
+   "action": "remove",
+   "created": "2026-08-16T14:27:01-06:00",
+   "id": "3882fc24de",
+   "kept": "Library/The Tabernacle Choir at Temple Square/Consider the Lilies/03 - Morning Has Broken.flac",
+   "removed": "Library/The Tabernacle Choir at Temple Square/100 Years - Celebrating a Century of Recording Excellence/03 - Morning Has Broken.flac"
+  },
+  {
+   "action": "rename",
+   "created": "2026-08-16T14:34:23-06:00",
+   "id": "1e00de5800",
+   "renames": [
+    {
+     "from": "Library/Andrew Lloyd Webber/The Phantom of the Opera_ The Original Motion Picture Soundtrack/14 - All I Ask of You (reprise).flac",
+     "to": "Library/Andrew Lloyd Webber/The Phantom of the Opera_ The Original Motion Picture Soundtrack/All I Ask of You - Andrew Lloyd Webber [Reprise].flac"
+    }
+   ]
+  },
+  {
+   "action": "rename",
+   "created": "2026-08-16T14:34:38-06:00",
+   "id": "31243aa08f",
+   "renames": [
+    {
+     "from": "Library/As December Falls/As December Falls/09 - Mayday (Live).flac",
+     "to": "Library/As December Falls/As December Falls/Mayday - As December Falls [Live].flac"
+    }
+   ]
+  },
+  {
+   "action": "rename",
+   "created": "2026-08-16T14:34:46-06:00",
+   "id": "d3d5fe30c4",
+   "renames": [
+    {
+     "from": "Library/As December Falls/As December Falls/10 - Carousel (Live).flac",
+     "to": "Library/As December Falls/As December Falls/Carousel - As December Falls [Live].flac"
+    }
+   ]
+  },
+  {
+   "a": "Library/Andrew Lloyd Webber/The Phantom of the Opera_ The Original Motion Picture Soundtrack/13 - All I Ask of You.flac",
+   "action": "keep_both",
+   "b": "Library/Andrew Lloyd Webber/The Phantom of the Opera_ The Original Motion Picture Soundtrack/All I Ask of You - Andrew Lloyd Webber [Reprise].flac",
+   "created": "2026-08-16T14:58:30-06:00",
+   "id": "d104003eb5"
+  },
+  {
+   "a": "Library/As December Falls/As December Falls/01 - Mayday.flac",
+   "action": "keep_both",
+   "b": "Library/As December Falls/As December Falls/Mayday - As December Falls [Live].flac",
+   "created": "2026-08-16T14:58:41-06:00",
+   "id": "41a6a97753"
+  },
+  {
+   "a": "Library/As December Falls/As December Falls/02 - Carousel.flac",
+   "action": "keep_both",
+   "b": "Library/As December Falls/As December Falls/Carousel - As December Falls [Live].flac",
+   "created": "2026-08-16T14:58:54-06:00",
+   "id": "cc762c0873"
   }
  ],
  "root": "/home/tychart/Music/DJ",
