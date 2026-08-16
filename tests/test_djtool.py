@@ -516,6 +516,17 @@ class TestFingerprints:
         fp = _enc([0xDEADBEEF] * 8 + [0x12345678] * 8)
         assert dt.fp_similarity(fp, fp) == pytest.approx(1.0)
 
+    def test_similarity_identical_raw_format(self):
+        # fpcalc -raw output is comma-separated decimal words, not base64 —
+        # this format must decode to the same values (regression: it used to
+        # be base64-decoded into garbage, yielding None / "n/a").
+        words = [0xDEADBEEF] * 8 + [0x12345678] * 8
+        raw = ",".join(str(w) for w in words)
+        assert dt.fp_similarity(raw, raw) == pytest.approx(1.0)
+        other = ",".join(str(w) for w in [0x11111111] * 16)
+        sim = dt.fp_similarity(raw, other)
+        assert sim is not None and sim < 0.5
+
     def test_similarity_alignment(self):
         a = _enc([0xDEADBEEF] * 8)
         b = _enc([0x11111111] * 4 + [0xDEADBEEF] * 8)
@@ -543,6 +554,9 @@ class TestFingerprints:
         assert res is not None
         fp, dur = res
         assert fp and dur == pytest.approx(2.0, abs=0.5)
+        # stored fingerprints must round-trip through the similarity scorer
+        assert dt.fp_similarity(fp, fp) is not None
+        assert dt.fp_similarity(fp, fp) == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------

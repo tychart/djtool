@@ -570,7 +570,7 @@ class Track:
     album: str = ""
     track_no: str = ""
     format_desc: str = ""
-    fingerprint: str | None = None  # raw chromaprint, base64
+    fingerprint: str | None = None  # raw chromaprint (fpcalc -raw output)
     fp_duration: float | None = None
 
     # --- derived views (computed on demand, cached) -----------------------
@@ -965,9 +965,26 @@ def scan_collection(root: Path, use_cache: bool = True) -> tuple[list[Track], Sc
 MAX_FP_OFFSET = 32  # frames; ~0.123s each, covers small offsets between recordings
 
 
-def _fp_decode(b64: str) -> list[int]:
+def _fp_decode(fp: str) -> list[int]:
+    """Decode a stored fingerprint into 32-bit chromaprint words.
+
+    Accepts the raw fpcalc -raw format (comma-separated decimal words, which
+    compute_fingerprint stores) and base64-encoded big-endian words (legacy
+    cache entries / test fixtures). Returns [] on corrupt input.
+    """
+    s = (fp or "").strip()
+    if not s:
+        return []
+    if "," in s:
+        # raw fpcalc -raw output: "3560557156,3560627184,..."
+        out: list[int] = []
+        for part in s.split(","):
+            part = part.strip()
+            if part.isdigit():
+                out.append(int(part))
+        return out
     try:
-        data = base64.b64decode(b64)
+        data = base64.b64decode(s)
     except Exception:  # noqa: BLE001 - corrupt cached fingerprints are skipped
         return []
     words = len(data) // 4
@@ -998,7 +1015,7 @@ def fp_similarity(a: str | None, b: str | None) -> float | None:
 
 
 def compute_fingerprint(path: Path) -> tuple[str, float] | None:
-    """Run fpcalc, return (raw base64 fingerprint, duration) or None."""
+    """Run fpcalc, return (raw fingerprint, duration) or None."""
     if FPCALC is None:
         return None
     try:
