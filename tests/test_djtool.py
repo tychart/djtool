@@ -985,3 +985,31 @@ class TestLibraryPairReview:
         stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
         assert stats.quarantined == 1
         assert len(stats.remaining) == 0
+
+    def test_play_then_decide_stays_on_same_pair(self, root, monkeypatch):
+        # [o] play is an auxiliary action: after listening, the SAME pair must
+        # be re-prompted. The next decision must act on it, not the next pair.
+        p1_lib = make_wav(root / "Library" / "One.flac", seed=1)
+        p1_inc = root / "Incoming" / "One.flac"
+        shutil.copyfile(p1_lib, p1_inc)
+        p2_lib = make_wav(root / "Library" / "Two.flac", seed=2)
+        p2_inc = root / "Incoming" / "Two.flac"
+        shutil.copyfile(p2_lib, p2_inc)
+        tracks, _ = dt.scan_collection(root)
+        pairs = dt.find_candidates(tracks)
+        assert len(pairs) == 2
+        monkeypatch.setattr("djtool.review.play_audio", lambda path, console, label: None)
+        answers = iter(["o", "l", "q"])  # play B of pair 1, then keep A
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, pairs, dt.Console(color=False), mode="dedupe")
+        assert stats.quarantined == 1
+        assert not p1_inc.exists()  # decision applied to the pair we listened to
+        assert p2_inc.exists()      # next pair untouched
+
+    def test_info_stays_on_same_pair(self, root, monkeypatch):
+        pair, _fa, _fb = self._dup_library_pair(root)
+        monkeypatch.setattr("djtool.review.play_audio", lambda path, console, label: None)
+        answers = iter(["i", "s", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.skipped == 1  # 's' was consumed by the same pair after info

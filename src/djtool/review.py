@@ -306,17 +306,17 @@ def review_pairs(
                 stats.processed += 1
             elif choice == "p":
                 play_audio(pair.a.path, console, "A")
-                pending.append(pair)
+                idx -= 1  # auxiliary action: re-prompt the same pair
             elif choice == "o":
                 play_audio(pair.b.path, console, "B")
-                pending.append(pair)
+                idx -= 1  # auxiliary action: re-prompt the same pair
             elif choice == "c":
                 play_audio(pair.a.path, console, "A")
                 play_audio(pair.b.path, console, "B")
-                pending.append(pair)
+                idx -= 1  # auxiliary action: re-prompt the same pair
             elif choice == "i":
                 print_info(pair, console)
-                pending.append(pair)
+                idx -= 1  # auxiliary action: re-prompt the same pair
             elif choice == "s":
                 stats.skipped += 1
                 if round_no == 1:
