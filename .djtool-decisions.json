@@ -1,0 +1,41 @@
+{
+ "decisions": [
+  {
+   "a": "Library/The Tabernacle Choir at Temple Square/100 Years - Celebrating a Century of Recording Excellence/02 - How Great Thou Art.flac",
+   "action": "keep_both",
+   "b": "Library/The Tabernacle Choir at Temple Square/Then Sings My Soul/01 - How Great Thou Art.flac",
+   "created": "2026-08-16T14:18:57-06:00",
+   "id": "c10e80e3b1"
+  },
+  {
+   "action": "remove",
+   "created": "2026-08-16T14:19:48-06:00",
+   "id": "6cb502b37d",
+   "kept": "Library/The Tabernacle Choir at Temple Square/Then Sings My Soul/11 - The Lord's Prayer.flac",
+   "removed": "Library/The Tabernacle Choir at Temple Square/100 Years - Celebrating a Century of Recording Excellence/06 - The Lord's Prayer.flac"
+  },
+  {
+   "action": "remove",
+   "created": "2026-08-16T14:19:57-06:00",
+   "id": "04ccd80c03",
+   "kept": "Library/The Tabernacle Choir at Temple Square/Then Sings My Soul/02 - How Firm A Foundation.flac",
+   "removed": "Library/The Tabernacle Choir at Temple Square/100 Years - Celebrating a Century of Recording Excellence/17 - How Firm A Foundation.flac"
+  },
+  {
+   "action": "remove",
+   "created": "2026-08-16T14:19:59-06:00",
+   "id": "64a2a9bb5f",
+   "kept": "Library/The Tabernacle Choir at Temple Square/Consider the Lilies/17 - Consider the Lilies.flac",
+   "removed": "Library/The Tabernacle Choir at Temple Square/100 Years - Celebrating a Century of Recording Excellence/18 - Consider The Lilies.flac"
+  },
+  {
+   "action": "remove",
+   "created": "2026-08-16T14:20:16-06:00",
+   "id": "1812a33d31",
+   "kept": "Library/The Tabernacle Choir at Temple Square/Consider the Lilies/08 - The Lord Bless You and Keep You.flac",
+   "removed": "Library/The Tabernacle Choir at Temple Square/Then Sings My Soul/18 - The Lord Bless You And Keep You.flac"
+  }
+ ],
+ "root": "/home/tychart/Music/DJ",
+ "version": 1
+}
