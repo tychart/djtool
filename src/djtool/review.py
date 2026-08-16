@@ -109,24 +109,38 @@ def action_version(
         console.out(console.dim("choices: [a] version A  [b] version B  [x] version both  [.] cancel"))
         return "cancelled"
 
-    planned: list[tuple[Track, Path, Path]] = []  # (track, source path, target path)
+    planned: list[tuple[Track, Path, Path]] = []  # (track, source path, target path); src == dst = already named
     for t in selected:
-        version = _ask_version(console, get_input, f"the {'A' if t is pair.a else 'B'} file")
-        if version is None:
-            console.out(console.dim("cancelled"))
-            return "cancelled"
-        dst = t.path.with_name(derive_track_name(t, version=version))
-        if dst.exists() or any(dst == p[2] for p in planned):
-            console.warn(f"'{dst.name}' already exists in that folder — pick a different version")
-            return "cancelled"
-        planned.append((t, t.path, dst))
+        while True:
+            version = _ask_version(console, get_input, f"the {'A' if t is pair.a else 'B'} file")
+            if version is None:
+                console.out(console.dim("cancelled"))
+                return "cancelled"
+            dst = t.path.with_name(derive_track_name(t, version=version))
+            if dst == t.path:
+                # already named with this qualifier (e.g. the rename was applied
+                # earlier) — the desired state already exists
+                planned.append((t, t.path, t.path))
+                break
+            if dst.exists() or any(dst == p[2] for p in planned):
+                console.warn(f"'{dst.name}' already exists in that folder — pick a different version")
+                continue  # re-ask the qualifier instead of bouncing the pair
+            planned.append((t, t.path, dst))
+            break
 
     renames: list[tuple[str, str]] = []
     for t, src, dst in planned:
+        if src == dst:
+            continue  # no-op: already named as chosen
         src.rename(dst)
         renames.append((t.rel, dst.relative_to(root).as_posix()))
-    record_rename_decision(root, renames, pair.a.rel, pair.b.rel)
-    return "renamed"
+    if renames:
+        record_rename_decision(root, renames, pair.a.rel, pair.b.rel)
+        return "renamed"
+    # nothing needed renaming — the version distinction already exists; the
+    # confirmation is recorded as keep-both so the pair is never re-asked
+    record_keep_both_decision(root, pair.a.rel, pair.b.rel)
+    return "kept"
 
 
 @dataclass

@@ -1160,3 +1160,50 @@ class TestResolvedPairs:
                                  path=root / "Tracks" / "Song - Artist [Live].flac",
                                  size=1, title="Song", artist="Artist")
         assert dt.find_candidates([track_a, track_b_new], resolved=resolved) == []
+
+    def test_v_on_already_versioned_pair_records_without_renaming(self, root, monkeypatch):
+        # regression: [v] on a pair whose file already carries the chosen
+        # qualifier must record the resolution, not loop on a self-collision
+        fa = root / "Library" / "Album A" / "01 - Song.flac"
+        fb = root / "Library" / "Album B" / "Song - Artist [Live].flac"
+        fa.parent.mkdir(parents=True)
+        fa.write_bytes(b"a")
+        fb.parent.mkdir(parents=True)
+        fb.write_bytes(b"b")
+        track_a = make_track(root, "library", "Album A/01 - Song.flac", path=fa, size=1,
+                             title="Song", artist="Artist")
+        track_b = make_track(root, "library", "Album B/Song - Artist [Live].flac", path=fb, size=1,
+                             title="Song (Live)", artist="Artist")
+        pair = dt.make_pair(track_a, track_b)
+        answers = iter(["v", "b", "Live", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.processed == 1 and stats.renamed == 0
+        assert fb.exists()  # untouched — already named correctly
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "keep_both"
+        resolved = dt.resolved_pairs(root)
+        assert frozenset((track_a.rel, track_b.rel)) in resolved
+        assert dt.find_candidates([track_a, track_b], resolved=resolved) == []
+
+    def test_v_collision_reasks_qualifier(self, root, monkeypatch):
+        ta = root / "Tracks" / "One.flac"
+        ta.write_bytes(b"a")
+        tb = root / "Tracks" / "Two.flac"
+        tb.write_bytes(b"b")
+        taken = root / "Tracks" / "Song - Artist [Taken].flac"
+        taken.write_bytes(b"t")
+        track_a = make_track(root, "tracks", "One.flac", path=ta, size=1,
+                             title="Song", artist="Artist")
+        track_b = make_track(root, "tracks", "Two.flac", path=tb, size=1,
+                             title="Song", artist="Artist")
+        pair = dt.make_pair(track_a, track_b)
+        # first qualifier collides with an existing file -> re-ask within the flow
+        answers = iter(["v", "b", "Taken", "Live", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.renamed == 1
+        assert (root / "Tracks" / "Song - Artist [Live].flac").exists()
+        assert taken.exists()  # the colliding file was never touched
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "rename"
