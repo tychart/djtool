@@ -22,6 +22,7 @@ from djtool.decisions import (
     describe_decision,
     load_decisions,
     replay_decisions,
+    resolved_pairs,
 )
 from djtool.errors import ConfigError, NameCollision
 from djtool.model import SOURCE_DIRS, SOURCES, Track
@@ -89,7 +90,7 @@ def cmd_doctor(args: argparse.Namespace, console: Console, root: Path) -> int:
         n = len(load_decisions(root).get("decisions", []))
         console.out(f"Decisions:        {dpath} ({n} recorded; replayed on 'dedupe')")
     else:
-        console.out(f"Decisions:        {dpath} not present (created when a Library-internal pair is resolved)")
+        console.out(f"Decisions:        {dpath} not present (created when a pair is resolved)")
     console.out("")
     cfg_file = config_path()
     if cfg_file.exists():
@@ -138,7 +139,9 @@ def cmd_scan(args: argparse.Namespace, console: Console, root: Path) -> int:
     ensure_dirs(root, console)
     tracks, stats = scan_collection(root, use_cache=not args.no_cache)
     _print_scan_summary(console, tracks, stats)
-    pairs = find_candidates(tracks)
+    resolved = resolved_pairs(root)
+    pairs = find_candidates(tracks, resolved=resolved)
+    skipped = len(find_candidates(tracks)) - len(pairs)
 
     counts = Counter(p.category for p in pairs)
     if pairs:
@@ -146,7 +149,12 @@ def cmd_scan(args: argparse.Namespace, console: Console, root: Path) -> int:
         for cat in CATEGORIES:
             if counts[cat]:
                 console.out(f"  {cat}: {counts[cat]} pair(s)")
+        if skipped:
+            console.out(console.dim(f"  ({skipped} pair(s) already resolved by recorded decisions — skipped)"))
         console.out(console.dim("run 'djtool dedupe' to review, 'djtool ingest' for the Incoming workflow"))
+    elif skipped:
+        console.out("")
+        console.info(f"no new candidates — {skipped} pair(s) already resolved by recorded decisions")
     else:
         console.out("")
         console.info("no duplicates or candidates found")
@@ -159,11 +167,14 @@ def cmd_dedupe(args: argparse.Namespace, console: Console, root: Path) -> int:
     if not args.no_replay:
         replay_decisions(root, console)
     tracks, stats = scan_collection(root, use_cache=not args.no_cache)
-    pairs = find_candidates(tracks)
-    console.out(console.dim(
-        f"Library {stats.counts['library']} · Tracks {stats.counts['tracks']} · "
-        f"Incoming {stats.counts['incoming']} — {len(pairs)} pair(s) for review"
-    ))
+    resolved = resolved_pairs(root)
+    pairs = find_candidates(tracks, resolved=resolved)
+    skipped = len(find_candidates(tracks)) - len(pairs)
+    header = (f"Library {stats.counts['library']} · Tracks {stats.counts['tracks']} · "
+              f"Incoming {stats.counts['incoming']} — {len(pairs)} pair(s) for review")
+    if skipped:
+        header += f" ({skipped} already resolved — skipped)"
+    console.out(console.dim(header))
     for w in stats.warnings:
         console.out(console.dim("  warn: " + w))
     if not pairs:
@@ -191,7 +202,7 @@ def cmd_ingest(args: argparse.Namespace, console: Console, root: Path) -> int:
         console.info("nothing in Incoming/")
         save_cache_from_tracks(root, tracks)
         return 0
-    pairs = find_candidates(tracks)
+    pairs = find_candidates(tracks, resolved=resolved_pairs(root))
     cross = [p for p in pairs if (p.a.source == "incoming") != (p.b.source == "incoming")]
     console.out(console.dim(
         f"Incoming: {len(incoming)} file(s) · {len(cross)} candidate(s) vs Library/Tracks"
@@ -281,7 +292,7 @@ def cmd_cache(args: argparse.Namespace, console: Console, root: Path) -> int:
 
 
 def cmd_decisions(args: argparse.Namespace, console: Console, root: Path) -> int:
-    """List, remove or clear recorded Library-internal dedupe decisions."""
+    """List, remove or clear recorded pair decisions."""
     data = load_decisions(root)
     decisions = data.get("decisions", [])
     if args.decisions_action == "list":

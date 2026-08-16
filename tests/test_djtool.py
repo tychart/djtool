@@ -889,7 +889,7 @@ class TestDecisions:
         fa.write_bytes(b"a")
         rel = "Library/Album A/01 - Song.flac"
         to_rel = "Library/Album A/Song - Artist [Live].flac"
-        dt.record_rename_decision(root, [(rel, to_rel)])
+        dt.record_rename_decision(root, [(rel, to_rel)], "Library/Album A/01 - Song.flac", rel)
         stats = dt.replay_decisions(root, dt.Console(color=False))
         assert stats.renamed == 1
         assert not fa.exists() and (root / to_rel).exists()
@@ -901,7 +901,7 @@ class TestDecisions:
         to_rel = "Library/Album A/Song - Artist [Live].flac"
         (root / to_rel).parent.mkdir(parents=True, exist_ok=True)
         (root / to_rel).write_bytes(b"x")
-        dt.record_rename_decision(root, [("Library/Album A/01 - Song.flac", to_rel)])
+        dt.record_rename_decision(root, [("Library/Album A/01 - Song.flac", to_rel)], "Library/Album A/01 - Song.flac", "Library/Album B/02 - Song.flac")
         stats = dt.replay_decisions(root, dt.Console(color=False))
         assert stats.renamed == 0 and stats.skipped == 1
 
@@ -1078,3 +1078,85 @@ class TestLibraryPairReview:
         assert stats.quarantined == 0 and stats.kept == 1
         assert libf.exists() and trkf.exists()
         assert dt.load_decisions(root)["decisions"] == []
+
+
+class TestResolvedPairs:
+    def test_resolved_pairs_remove_and_keep_both(self, root):
+        dt.record_remove_decision(root, kept_rel="Library/A/a.flac", removed_rel="Library/B/b.flac")
+        dt.record_keep_both_decision(root, "Tracks/x.flac", "Tracks/y.flac")
+        resolved = dt.resolved_pairs(root)
+        assert frozenset(("Library/A/a.flac", "Library/B/b.flac")) in resolved
+        assert frozenset(("Tracks/x.flac", "Tracks/y.flac")) in resolved
+
+    def test_resolved_pairs_tracks_rename_to_new_rel(self, root):
+        rel_b = "Library/Album B/02 - Song.flac"
+        rel_b_new = "Library/Album B/Song - Artist [Live].flac"
+        (root / rel_b_new).parent.mkdir(parents=True)
+        (root / rel_b_new).write_bytes(b"b")
+        dt.record_rename_decision(root, [(rel_b, rel_b_new)], "Library/Album A/01 - Song.flac", rel_b)
+        resolved = dt.resolved_pairs(root)
+        # the pair is resolved at its post-rename identity
+        assert frozenset(("Library/Album A/01 - Song.flac", rel_b_new)) in resolved
+        assert frozenset(("Library/Album A/01 - Song.flac", rel_b)) not in resolved
+
+    def test_resolved_pairs_falls_back_to_old_rel_before_rename(self, root):
+        # pre-replay state: file still at the old name — pair resolved there
+        rel_b = "Library/Album B/02 - Song.flac"
+        rel_b_new = "Library/Album B/Song - Artist [Live].flac"
+        (root / rel_b).parent.mkdir(parents=True)
+        (root / rel_b).write_bytes(b"b")
+        dt.record_rename_decision(root, [(rel_b, rel_b_new)], "Library/Album A/01 - Song.flac", rel_b)
+        resolved = dt.resolved_pairs(root)
+        assert frozenset(("Library/Album A/01 - Song.flac", rel_b)) in resolved
+
+    def test_find_candidates_skips_resolved_pairs(self, root):
+        a = make_track(root, "tracks", "a.flac", title="Song", artist="Artist")
+        b = make_track(root, "tracks", "b.flac", title="Song", artist="Artist")
+        assert len(dt.find_candidates([a, b])) == 1
+        resolved = {frozenset((a.rel, b.rel))}
+        assert dt.find_candidates([a, b], resolved=resolved) == []
+
+    def test_b_on_tracks_pair_records_and_suppresses(self, root, monkeypatch):
+        ta = root / "Tracks" / "One.flac"
+        ta.write_bytes(b"a")
+        tb = root / "Tracks" / "Two.flac"
+        tb.write_bytes(b"b")
+        track_a = make_track(root, "tracks", "One.flac", path=ta, size=1,
+                             title="Song", artist="Artist")
+        track_b = make_track(root, "tracks", "Two.flac", path=tb, size=1,
+                             title="Song", artist="Artist")
+        pair = dt.make_pair(track_a, track_b)
+        answers = iter(["b", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.kept == 1
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "keep_both"
+        # resolved: candidate generation no longer presents the pair
+        resolved = dt.resolved_pairs(root)
+        assert dt.find_candidates([track_a, track_b], resolved=resolved) == []
+
+    def test_v_on_tracks_pair_renames_records_and_suppresses(self, root, monkeypatch):
+        ta = root / "Tracks" / "One.flac"
+        ta.write_bytes(b"a")
+        tb = root / "Tracks" / "Two.flac"
+        tb.write_bytes(b"b")
+        track_a = make_track(root, "tracks", "One.flac", path=ta, size=1,
+                             title="Song", artist="Artist")
+        track_b = make_track(root, "tracks", "Two.flac", path=tb, size=1,
+                             title="Song", artist="Artist")
+        pair = dt.make_pair(track_a, track_b)
+        answers = iter(["v", "b", "Live", "q"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+        stats = dt.review_pairs(root, [pair], dt.Console(color=False), mode="dedupe")
+        assert stats.renamed == 1
+        assert (root / "Tracks" / "Song - Artist [Live].flac").exists()
+        d = dt.load_decisions(root)["decisions"][0]
+        assert d["action"] == "rename"
+        # pair is resolved at its post-rename identity (as a rescan would see it)
+        resolved = dt.resolved_pairs(root)
+        assert frozenset((track_a.rel, "Tracks/Song - Artist [Live].flac")) in resolved
+        track_b_new = make_track(root, "tracks", "Song - Artist [Live].flac",
+                                 path=root / "Tracks" / "Song - Artist [Live].flac",
+                                 size=1, title="Song", artist="Artist")
+        assert dt.find_candidates([track_a, track_b_new], resolved=resolved) == []

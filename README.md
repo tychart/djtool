@@ -58,7 +58,7 @@ uv run djtool ingest                   # Incoming/ review → promote to Tracks 
 uv run djtool trash list               # inspect quarantine
 uv run djtool trash empty --yes        # permanently empty quarantine
 uv run djtool cache status | clear     # derived-data cache
-uv run djtool decisions list           # recorded Library-internal decisions
+uv run djtool decisions list           # recorded pair decisions
 uv run djtool decisions remove <id>    # drop one decision
 uv run djtool decisions clear          # drop all decisions
 uv run djtool sync status              # dry-run comparison both directions
@@ -118,36 +118,33 @@ quarantines the other to `.Trash/YYYY-MM-DD/`; `[b]` keeps both (in `ingest`,
 it also promotes the Incoming copy to `Tracks/` — flat, renamed); `[p]`/`[o]`
 play files via `ffplay`; `[c]` plays A then B; `[s]` defers; `[q]` quits safely.
 
-## Library-internal duplicates: recorded decisions
+## Recorded decisions: outcomes that would recur
 
-When **both** files of a pair live in `Library/`, djtool cannot silently pick a
-winner — but it can remember yours. The review prompt gains four recorded
-choices:
+Some review outcomes are expected to come back, so djtool remembers them in
+`.djtool-decisions.json` (project dir — outside the DJ root, so a NAS sync
+never touches it) and treats the pair as *resolved*:
 
-```
-[l] Keep A / remove B      (removes B now, records the decision)
-[j] Keep B / remove A      (removes A now, records the decision)
-[b] Keep both              (records it, so the pair never re-asks)
-[v] Version/rename         (rename A/B/both with a version qualifier, e.g.
-                            'How Great Thou Art - The Tabernacle Choir at
-                            Temple Square [Live].flac' — in place, same album
-                            folder, using the Tracks naming scheme)
-```
+* `[b]` **Keep both** — the pair re-forms on every scan, so the decision
+  records it and candidate generation skips it from then on.
+* `[v]` **Version/rename** — rename A/B/both with a version qualifier (e.g.
+  `How Great Thou Art - The Tabernacle Choir at Temple Square [Live].flac`,
+  in place, using the Tracks naming scheme). Treated like keep-both: the pair
+  is recorded and never re-asked, and the rename is re-applied by replay if
+  the old name reappears. Renames are tracked old → new, so suppression
+  follows the renamed file.
+* `[l]`/`[j]` **remove** — recorded **only when the removed file lives in
+  `Library/`**: the Library folder is often replaced wholesale from a NAS, so
+  every `djtool dedupe` run replays the removal first (re-quarantine,
+  re-apply renames) before asking anything. Removals from `Tracks/`/
+  `Incoming/` are permanent and are not recorded.
 
-Each decision is stored in `.djtool-decisions.json` in the `djtool/` project
-folder — **outside the DJ root**, so a NAS sync never touches it. The losing
-file is quarantined into `.Trash/` immediately.
+The only pair-type difference in the prompt: `[j]` is hidden on
+`Library/`-vs-other pairs because the Library copy is protected (use `[l]` to
+keep it). `[v]` is available on every pair. `dedupe --no-replay` skips the
+replay step; `djtool decisions list/remove/clear` inspects or edits the set;
+`dedupe`/`scan` report how many candidates were skipped as already resolved.
 
-Because the `Library/` folder is often replaced wholesale from a NAS (silently
-undoing any cleanup), every `djtool dedupe` run **replays** the recorded
-decisions first, before you are asked anything: losers are re-quarantined,
-renames re-applied — matched by relative path inside `Library/`, which the NAS
-copy preserves. `dedupe --no-replay` disables the step; `djtool decisions
-list/remove/clear` inspects or edits the set.
-
-This is the **only** way djtool modifies `Library/`. For pairs that span
-`Library/` vs `Tracks/`/`Incoming/`, behavior is unchanged: the Library copy
-wins and the other side is removed.
+Recorded decisions are the **only** way djtool modifies `Library/`.
 
 ## Mixxx
 
@@ -160,11 +157,12 @@ up in a library scan — no extra setup needed. If you don't want `Library/`
 
 `.djtool-cache.json` lives in the `djtool/` project folder and stores
 **derived data only** (hashes, durations, parsed tags, fingerprints), invalidated
-by file size + mtime. `.djtool-decisions.json` stores **your recorded
-Library-internal decisions** (user intent, replayed on `dedupe`). Both are
-tagged with the DJ root they were built for. Deleting the cache can never lose
-collection state or review decisions; deleting the decisions file only means
-the next `dedupe` will ask you about Library-internal pairs again.
+by file size + mtime. `.djtool-decisions.json` stores **your recorded pair
+decisions** (user intent: resolved pairs are skipped, removals/renames
+replayed on `dedupe`). Both are tagged with the DJ root they were built for.
+Deleting the cache can never lose collection state or review decisions;
+deleting the decisions file only means resolved pairs are re-asked and
+Library removals/renames are no longer replayed.
 
 ## Sync
 

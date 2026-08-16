@@ -1,19 +1,21 @@
-"""Recorded Library-internal dedupe decisions and their replay.
+"""Recorded pair decisions and their replay.
 
-Library/ is read-only: djtool never modifies it. The single exception is a
-*recorded decision*: when the user reviews a pair where both files live in
-Library/ and picks an outcome (keep one / rename with a version qualifier /
-keep both), the outcome is stored in .djtool-decisions.json (project dir, so
-NAS syncs never touch it).
+Some review outcomes are expected to recur, so djtool records them in
+.djtool-decisions.json (project dir, so NAS syncs never touch it):
 
-The Library folder is often replaced wholesale from a NAS, which silently
-undoes any manual cleanup. Every `djtool dedupe` run therefore replays the
-recorded decisions first: losing files are re-quarantined, renames are
-re-applied, and the user is only asked about pairs that have no recorded
-outcome.
+  * keep-both ([b]) and version/rename ([v]) — the pair re-forms on every
+    scan, so the decision marks it *resolved* and candidate generation skips
+    it from then on;
+  * removal of a Library file — the Library folder is often replaced wholesale
+    from a NAS, which silently undoes any cleanup, so every `djtool dedupe`
+    run replays the removal first (re-quarantine, re-apply renames).
 
-Decisions are matched to files by their relative path inside Library — the
-NAS copy keeps the folder structure, so paths are stable across resets.
+Removals from Tracks/ or Incoming/ are permanent and are not recorded.
+Recorded decisions are the only way djtool modifies Library/.
+
+Decisions are matched to files by their relative path; rename decisions track
+members through their old -> new names so a pair stays resolved after a
+[Version] rename (and after replays / Library resets).
 """
 
 from __future__ import annotations
@@ -27,8 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from djtool.console import Console
-from djtool.model import Track
-from djtool.quarantine import quarantine_library_file
+from djtool.model import SOURCES, Track
+from djtool.quarantine import quarantine_file, quarantine_library_file
 from djtool.state import project_dir
 
 DECISIONS_FILE_NAME = ".djtool-decisions.json"
@@ -105,7 +107,12 @@ def _replace_pair(data: dict[str, Any], a_rel: str, b_rel: str, entry: dict[str,
 
 
 def record_remove_decision(root: Path, kept_rel: str, removed_rel: str) -> None:
-    """Record 'keep one file, remove the other' for a Library-internal pair."""
+    """Record 'keep one file, remove the other'.
+
+    Only used when the removed file lives in Library/ — a Library file would
+    reappear on the next NAS reset, so the removal must be replayable.
+    Removals from Tracks/ or Incoming/ are permanent and are not recorded.
+    """
     data = _load_or_new(root)
     _replace_pair(data, kept_rel, removed_rel, {
         "created": _now_iso(),
@@ -117,7 +124,11 @@ def record_remove_decision(root: Path, kept_rel: str, removed_rel: str) -> None:
 
 
 def record_keep_both_decision(root: Path, a_rel: str, b_rel: str) -> None:
-    """Record 'keep both as-is' so the pair is never re-asked after a reset."""
+    """Record 'keep both' for any pair type.
+
+    The pair re-forms on every scan, so the decision marks it resolved and
+    candidate generation skips it from then on.
+    """
     data = _load_or_new(root)
     _replace_pair(data, a_rel, b_rel, {
         "created": _now_iso(),
@@ -128,16 +139,22 @@ def record_keep_both_decision(root: Path, a_rel: str, b_rel: str) -> None:
     _save(data)
 
 
-def record_rename_decision(root: Path, renames: list[tuple[str, str]]) -> None:
-    """Record renames applied to Library files (version qualifiers, etc.)."""
+def record_rename_decision(root: Path, renames: list[tuple[str, str]], a_rel: str, b_rel: str) -> None:
+    """Record renames applied to a pair (version qualifiers, etc.).
+
+    Works for any pair type: the pair is treated as resolved (like keep-both)
+    and the rename is re-applied by replay when the old name reappears. The
+    pair identity (a_rel, b_rel — the rels at decision time) is stored so the
+    decision can be matched even when only one member was renamed.
+    """
     if not renames:
         return
     data = _load_or_new(root)
-    a_rel = renames[0][0]
-    b_rel = renames[1][0] if len(renames) > 1 else renames[0][0]
     _replace_pair(data, a_rel, b_rel, {
         "created": _now_iso(),
         "action": "rename",
+        "a": a_rel,
+        "b": b_rel,
         "renames": [{"from": frm, "to": to} for frm, to in renames],
     })
     _save(data)
@@ -187,10 +204,14 @@ class ReplayStats:
 
 def _track_for(root: Path, path: Path) -> Track:
     st = path.stat()
+    rel = path.relative_to(root).as_posix()
+    source = rel.split("/", 1)[0].lower()
+    if source not in SOURCES:
+        source = "library"  # defensive: recorded paths are collection-relative
     return Track(
         path=path,
-        rel=path.relative_to(root).as_posix(),
-        source="library",
+        rel=rel,
+        source=source,
         size=st.st_size,
         mtime_ns=st.st_mtime_ns,
     )
@@ -239,7 +260,11 @@ def _replay_remove(root: Path, d: dict[str, Any], stats: ReplayStats) -> None:
         )
         return
     try:
-        quarantine_library_file(root, _track_for(root, removed))
+        track = _track_for(root, removed)
+        if track.source == "library":
+            quarantine_library_file(root, track)
+        else:  # defensive: recorded removals are Library-only in practice
+            quarantine_file(root, track)
         stats.removed += 1
     except OSError as e:
         stats.skipped += 1
@@ -264,6 +289,53 @@ def _replay_rename(root: Path, d: dict[str, Any], stats: ReplayStats) -> None:
         except OSError as e:
             stats.skipped += 1
             stats.warnings.append(f"recorded decision {d['id']}: rename failed ({r['from']}): {e}")
+
+
+def resolved_pairs(root: Path) -> set[frozenset[str]]:
+    """Relative-path keys of pairs the user has already resolved.
+
+    Any recorded decision — remove, rename, keep_both — marks its pair as
+    resolved: candidate generation must not re-present it. Rename decisions
+    track members through their old -> new names, so a pair stays suppressed
+    after a [v] version-rename and after replays / Library resets.
+    """
+    data = load_decisions(root)
+    out: set[frozenset[str]] = set()
+    for d in data.get("decisions", []):
+        action = d.get("action")
+        if action == "remove":
+            kept, removed = d.get("kept"), d.get("removed")
+            if kept and removed:
+                out.add(frozenset((kept, removed)))
+        elif action == "rename":
+            renames = [r for r in d.get("renames", []) if r.get("from") and r.get("to")]
+            a, b = d.get("a"), d.get("b")
+            if a and b:
+                out.add(frozenset((_current_after_rename(root, a, renames),
+                                   _current_after_rename(root, b, renames))))
+            elif len(renames) >= 2:
+                # legacy entries (pre pair-identity): both members renamed
+                out.add(frozenset(
+                    r["to"] if (root / r["to"]).exists() else r["from"]
+                    for r in renames
+                ))
+        elif action == "keep_both":
+            a, b = d.get("a"), d.get("b")
+            if a and b:
+                out.add(frozenset((a, b)))
+    return out
+
+
+def _current_after_rename(root: Path, rel: str, renames: list[dict[str, Any]]) -> str:
+    """A member's current relative path after (possibly) a recorded rename.
+
+    Returns the rename target when the member was renamed and the target
+    exists; otherwise the member's rel as recorded.
+    """
+    for r in renames:
+        if r.get("from") == rel:
+            return r["to"] if (root / r["to"]).exists() else rel
+    return rel
 
 
 def describe_decision(d: dict[str, Any]) -> str:

@@ -112,12 +112,16 @@ def is_candidate(p: Pair) -> bool:
     )
 
 
-def find_candidates(tracks: list[Track]) -> list[Pair]:
+def find_candidates(tracks: list[Track], resolved: set[frozenset[str]] | None = None) -> list[Pair]:
     """Generate pairs for review: exact duplicates first, then fuzzy candidates.
 
     Avoids quadratic comparison by grouping on hash (exact) and on the
-    normalized artist+title block key (fuzzy).
+    normalized artist+title block key (fuzzy). A *resolved* set of pair keys
+    (frozensets of two relative paths, from decisions.resolved_pairs) skips
+    pairs the user has already decided on (keep-both / version-rename /
+    recorded removal).
     """
+    resolved = resolved or set()
     pairs: list[Pair] = []
     seen: set[frozenset[str]] = set()
 
@@ -131,9 +135,12 @@ def find_candidates(tracks: list[Track]) -> list[Pair]:
             continue
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
+                key = frozenset((group[i].rel, group[j].rel))
+                if key in resolved:
+                    continue
                 p = make_pair(group[i], group[j], exact=True)
                 pairs.append(p)
-                seen.add(frozenset((p.a.rel, p.b.rel)))
+                seen.add(key)
 
     # 2. fuzzy candidates — within artist/title blocks
     blocks: dict[str, list[Track]] = {}
@@ -145,7 +152,8 @@ def find_candidates(tracks: list[Track]) -> list[Pair]:
             continue
         for i in range(len(group)):
             for j in range(i + 1, len(group)):
-                if frozenset((group[i].rel, group[j].rel)) in seen:
+                key = frozenset((group[i].rel, group[j].rel))
+                if key in seen or key in resolved:
                     continue
                 p = make_pair(group[i], group[j])
                 if is_candidate(p):

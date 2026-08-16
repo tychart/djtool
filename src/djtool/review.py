@@ -26,7 +26,7 @@ def action_keep_one(root: Path, pair: Pair, *, keep_a: bool) -> str:
     """[l]/[j]: keep one member, quarantine the other.
 
     Works for every pair type. A Library file is only removable when the pair
-    is Library-internal — the removal is recorded to the decisions file so it
+    is Library-internal (the removal is recorded to the decisions file so it
     can be replayed after a Library reset. In cross-source pairs the Library
     copy is protected and removal is refused.
     """
@@ -49,26 +49,32 @@ def action_keep_both(
     get_input: Callable[[str], str] | None = None,
     console: Console | None = None,
 ) -> str:
-    """[b] Keep both.
+    """[b] Keep both, and record the decision so the pair never re-asks.
 
-    Library-internal pairs record the decision so the pair never re-asks after
-    a Library reset. In ingest mode the Incoming copy is promoted to Tracks
-    (flat, renamed; a name collision triggers the interactive version/skip
-    resolution).
+    Applies to every pair type: a keep-both pair re-forms on the next scan,
+    so it is recorded as resolved. In ingest mode the Incoming copy is
+    promoted to Tracks (flat, renamed; a name collision triggers the
+    interactive version/skip resolution) and the recorded paths follow the
+    promoted file.
     """
-    if is_library_pair(pair):
-        record_keep_both_decision(root, pair.a.rel, pair.b.rel)
-        return "kept"
+    a_rel, b_rel = pair.a.rel, pair.b.rel
     if mode == "ingest":
         targets = [t for t in (pair.a, pair.b) if t.source == "incoming" and t.path.exists()]
         moved = False
         for t in targets:
-            _, action = promote_to_tracks(
+            dest, action = promote_to_tracks(
                 root, t, get_input=get_input, console=console
             )
             if action != "skipped":
                 moved = True
+                new_rel = dest.relative_to(root).as_posix()
+                if t is pair.a:
+                    a_rel = new_rel
+                else:
+                    b_rel = new_rel
+        record_keep_both_decision(root, a_rel, b_rel)
         return "promoted" if moved else "kept"
+    record_keep_both_decision(root, a_rel, b_rel)
     return "kept"
 
 
@@ -77,17 +83,18 @@ def is_library_pair(pair: Pair) -> bool:
     return pair.a.source == "library" and pair.b.source == "library"
 
 
-def action_version_library(
+def action_version(
     root: Path,
     pair: Pair,
     console: Console,
     get_input: Callable[[str], str],
 ) -> str:
-    """[v] for Library-internal pairs: version/rename one or both files.
+    """[v] Version/rename one or both files and record the decision.
 
-    Reuses the Tracks naming scheme ('Title - Artist [Version].ext'), applies
-    the rename immediately, and records it so it is re-applied after a
-    Library reset.
+    Works for every pair type. Reuses the Tracks naming scheme
+    ('Title - Artist [Version].ext'), applies the rename in place, and records
+    it: the pair is treated as resolved (like keep-both) and never re-asked,
+    and the rename is re-applied by replay if the old name reappears.
     """
     choice = (get_input("Version A, B, or both? [a/b/x] (. to cancel): ") or "").strip().lower()
     if choice in (".", "q"):
@@ -118,7 +125,7 @@ def action_version_library(
     for t, src, dst in planned:
         src.rename(dst)
         renames.append((t.rel, dst.relative_to(root).as_posix()))
-    record_rename_decision(root, renames)
+    record_rename_decision(root, renames, pair.a.rel, pair.b.rel)
     return "renamed"
 
 
@@ -188,10 +195,12 @@ def render_pair(pair: Pair, index: int, total: int, round_no: int, console: Cons
         console.out("    (all four are recorded)    [p] Play A    [o] Play B")
     elif pair.a.source == "library":
         keep = "Keep Library / remove B"
-        console.out(f"[l] {keep}    [b] Keep both    [p] Play A    [o] Play B")
+        console.out(f"[l] {keep}    [b] Keep both    [v] Version/rename    [p] Play A    [o] Play B")
+        console.out(console.dim("    ([b] and [v] are recorded — resolved pairs won't be re-asked)"))
     else:
         keep = "Keep A / remove B"
-        console.out(f"[l] {keep}    [j] Keep B / remove A    [b] Keep both    [p] Play A    [o] Play B")
+        console.out(f"[l] {keep}    [j] Keep B / remove A    [b] Keep both    [v] Version/rename    [p] Play A    [o] Play B")
+        console.out(console.dim("    ([b] and [v] are recorded — resolved pairs won't be re-asked)"))
     console.out("[c] Compare audio (A then B)    [i] More info    [s] Skip for now    [q] Quit safely")
     if mode == "ingest":
         console.out(console.dim("[b] in ingest mode promotes the Incoming copy to Tracks/ (flat, renamed)."))
@@ -252,7 +261,6 @@ def review_pairs(
             ensure_fingerprints(pair)
             render_pair(pair, idx, len(round_pairs), round_no, console, mode)
             choice = (read("Choice: ") or "").strip().lower()
-            lib_pair = is_library_pair(pair)
             if choice == "q":
                 quit_now = True
                 quit_remaining = round_pairs[idx - 1:] + pending
@@ -274,11 +282,7 @@ def review_pairs(
                     stats.kept += 1
                 stats.processed += 1
             elif choice == "v":
-                if not lib_pair:
-                    console.out(console.dim("[v] is only available when both files are in Library/"))
-                    pending.append(pair)
-                    continue
-                res = action_version_library(root, pair, console, get_input=read)
+                res = action_version(root, pair, console, get_input=read)
                 if res == "cancelled":
                     pending.append(pair)
                 else:
@@ -311,7 +315,7 @@ def review_pairs(
                     pending.append(pair)  # one more chance in the next round
             else:
                 console.out(console.dim("choices: [l] keep A / remove B  [j] keep B / remove A  [b] keep both  "
-                                        "[p]/[o] play  [c] compare  [i] info  [s] skip  [q] quit"))
+                                        "[v] version/rename  [p]/[o] play  [c] compare  [i] info  [s] skip  [q] quit"))
                 pending.append(pair)
         round_no += 1
         if pending and not quit_now:

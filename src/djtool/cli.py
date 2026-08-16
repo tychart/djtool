@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = add("dedupe", "Interactive duplicate review (quarantine goes to .Trash)", cmd_dedupe)
     sp.add_argument("--no-cache", action="store_true", help="ignore the derived-data cache")
     sp.add_argument("--no-replay", action="store_true",
-                    help="do not replay recorded Library-internal decisions")
+                    help="do not replay recorded decisions")
     sp = add("ingest", "Review Incoming/ against Library/ and Tracks/, then promote or quarantine", cmd_ingest)
     sp.add_argument("--no-cache", action="store_true", help="ignore the derived-data cache")
     sp.add_argument("--promote-new", action="store_true", help="promote new files without asking")
@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     ca.add_parser("status", help="show cache path, size, entry count").set_defaults(func=cmd_cache)
     ca.add_parser("clear", help="delete the cache (safe: only derived data)").set_defaults(func=cmd_cache)
 
-    sp = sub.add_parser("decisions", help="List, remove or clear recorded Library-internal dedupe decisions")
+    sp = sub.add_parser("decisions", help="List, remove or clear recorded pair decisions")
     de = sp.add_subparsers(dest="decisions_action", metavar="ACTION", required=True)
     de.add_parser("list", help="list recorded decisions").set_defaults(func=cmd_decisions)
     rem = de.add_parser("remove", help="remove one decision by id")

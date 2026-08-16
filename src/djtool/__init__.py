@@ -19,14 +19,17 @@ Duplicate-detection pipeline (progressively more expensive)
                            unquestionable deletion rule; ambiguous cases are
                            shown to the human
 
-Recorded decisions (Library-internal duplicates)
-------------------------------------------------
-    When both files of a pair live in Library/, the review records the user's
-    choice (keep one / version-rename / keep both) in .djtool-decisions.json
-    (project dir, safe from NAS syncs). Because the Library folder is often
-    replaced wholesale from a NAS, every `djtool dedupe` run *replays* those
-    decisions first: losers are re-quarantined, renames re-applied — before
-    the user is asked anything. This is the only way djtool modifies Library/.
+Recorded decisions
+------------------
+    Any review outcome that is expected to recur is recorded in
+    .djtool-decisions.json (project dir, safe from NAS syncs):
+      * keep-both ([b]) and version/rename ([v]) — the pair re-forms on every
+        scan, so the decision marks it resolved and candidate generation
+        skips it from then on;
+      * removal of a Library file — Library/ is often replaced wholesale from
+        a NAS, so every `djtool dedupe` run replays the removal first.
+    Removals from Tracks//Incoming/ are permanent and are not recorded.
+    This is the only way djtool modifies Library/.
 
 Safety rules
 ------------
@@ -68,6 +71,7 @@ from djtool.decisions import (
     record_remove_decision,
     record_rename_decision,
     replay_decisions,
+    resolved_pairs,
 )
 from djtool.errors import ConfigError, ConfirmationRequired, DjToolError, NameCollision
 from djtool.fingerprint import FPCALC, compute_fingerprint, fp_similarity
@@ -147,7 +151,7 @@ __all__ = [
     "play_audio", "print_info", "project_dir", "promote_to_tracks", "prune_empty_dirs",
     "quarantine_file", "quarantine_library_file", "read_tags", "record_keep_both_decision", "record_remove_decision",
     "record_rename_decision", "render_pair", "render_track", "replay_decisions",
-    "requires_confirmation", "resolve_name_collision", "resolve_root", "review_pairs",
+    "requires_confirmation", "resolve_name_collision", "resolved_pairs", "resolve_root", "review_pairs",
     "rsync_dry_list", "sanitize_filename_part", "save_cache", "save_cache_from_tracks",
     "scan_collection", "simplify_artist", "split_feat", "text_sim", "trash_dir_for",
     "trash_entries", "version_terms_present",
